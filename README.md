@@ -61,11 +61,6 @@ cd scripts
 python ingest_data.py
 ```
 
-#### Terminal 3: Streamlit Frontend
-```bash
-cd frontend
-streamlit run app.py
-```
 
 ## Analytics Implementation
 - **Time-Series Partitioning**: `market_data` and `portfolio_history` are partitioned by month.
