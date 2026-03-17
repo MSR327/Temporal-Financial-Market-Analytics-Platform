@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Temporal Market Platform</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <!-- Sidebar Menu -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <i class="fas fa-chart-line"></i> TEMPORAL
+        </div>
+        <nav class="sidebar-nav">
+            <a href="/dashboard" class="nav-item {{ 'active' if page == 'home' }}">
+                <i class="fas fa-home"></i> Overview
+            </a>
+            <a href="/markets" class="nav-item {{ 'active' if page == 'markets' }}">
+                <i class="fas fa-chart-area"></i> Market Data
+            </a>
+            <a href="/portfolio" class="nav-item {{ 'active' if page == 'portfolio' }}">
+                <i class="fas fa-wallet"></i> My Portfolio
+            </a>
+            <a href="/trade" class="nav-item {{ 'active' if page == 'trade' }}">
+                <i class="fas fa-exchange-alt"></i> Trade
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <a href="/api/logout" class="nav-item">
+                <i class="fas fa-sign-out-alt"></i> Logout
+            </a>
+        </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-wrapper">
+        <header class="header-top">
+            <h1>
+                {% if page == 'home' %}Account Overview
+                {% elif page == 'markets' %}Market Analytics
+                {% elif page == 'portfolio' %}Portfolio Holdings
+                {% elif page == 'trade' %}Trading Terminal
+                {% endif %}
+            </h1>
+            <div class="user-badge">
+                <i class="fas fa-user-circle"></i> {{ username }}
+            </div>
+        </header>
+
+        <!-- Common Stats Bar (Always visible) -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Cash Balance</h3>
+                <p class="value" id="global-wallet">₹0.00</p>
+            </div>
+            <div class="stat-card">
+                <h3>Portfolio Value</h3>
+                <p class="value" id="global-portfolio">₹0.00</p>
+            </div>
+            <div class="stat-card">
+                <h3>Total Profit/Loss</h3>
+                <p class="value" id="global-pl">₹0.00</p>
+            </div>
+        </div>
+
+        <!-- Dynamic Content -->
+        <div id="page-content">
+            
+            {% if page == 'home' %}
+            <div class="content-section">
+                <h3>Wealth Growth History</h3>
+                <div style="height: 400px;">
+                    <canvas id="wealthChart"></canvas>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if page == 'markets' %}
+            <div class="main-grid">
+                <div class="content-section">
+                    <h3>All Assets</h3>
+                    <div class="market-grid" id="market-list">
+                        <!-- Loaded via JS -->
+                    </div>
+                </div>
+                <div class="content-section">
+                    <h3 id="selected-asset-title">Select an asset to view chart</h3>
+                    <div style="height: 300px;">
+                        <canvas id="assetPriceChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if page == 'portfolio' %}
+            <div class="content-section">
+                <h3>Current Holdings</h3>
+                <table id="portfolioTable">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Quantity</th>
+                            <th>Avg Buy Price</th>
+                            <th>Current Price</th>
+                            <th>Current Value</th>
+                            <th>P/L</th>
+                        </tr>
+                    </thead>
+                    <tbody><!-- Loaded via JS --></tbody>
+                </table>
+            </div>
+            {% endif %}
+
+            {% if page == 'trade' %}
+            <div class="content-section">
+                <div class="trade-form">
+                    <h3>Place Market Order</h3>
+                    <form id="tradeForm">
+                        <div class="form-group">
+                            <label>Asset</label>
+                            <select id="assetSelect" required onchange="updateTradePrice()">
+                                <option value="">Select Asset</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Transaction Type</label>
+                            <div class="trade-type">
+                                <label><input type="radio" name="orderType" value="buy" checked> Buy</label>
+                                <label><input type="radio" name="orderType" value="sell"> Sell</label>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Quantity</label>
+                            <input type="number" id="quantity" step="0.00001" placeholder="0.00" required oninput="calculateTotal()">
+                        </div>
+                        <div class="form-group">
+                            <p>Current Price: <span id="current-trade-price">₹0.00</span></p>
+                            <p>Estimated Total: <span id="estimated-total">₹0.00</span></p>
+                        </div>
+                        <button type="submit" class="trade-btn">Execute Trade</button>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+
+        </div>
+    </main>
+
+    <script>
+        let wealthChart, assetChart;
+        let pricesData = [];
+        let selectedAssetId = null;
+
+        // Optimized Data Fetchers
+        async function refreshDashboard() {
+            try {
+                // Fetch wallet and portfolio together
+                const [wRes, pRes, mRes] = await Promise.all([
+                    fetch('/api/wallet'),
+                    fetch('/api/portfolio'),
+                    fetch('/api/prices')
+                ]);
+
+                const wallet = await wRes.json();
+                const portfolio = await pRes.json();
+                pricesData = await mRes.json();
+
+                // 1. Update Global Stats
+                let totalValue = 0;
+                let totalPL = 0;
+                portfolio.forEach(i => {
+                    totalValue += i.current_value;
+                    totalPL += i.unrealized_pl;
+                });
+
+                document.getElementById('global-wallet').innerText = `₹${wallet.balance.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+                document.getElementById('global-portfolio').innerText = `₹${totalValue.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+                const plElem = document.getElementById('global-pl');
+                plElem.innerText = `₹${totalPL.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+                plElem.className = `value ${totalPL >= 0 ? 'pos' : 'neg'}`;
+
+                // 2. Update Market List (if on markets page)
+                const list = document.getElementById('market-list');
+                if (list) {
+                    list.innerHTML = pricesData.map(p => `
+                        <div class="asset-card" onclick="selectAsset(${p.asset_id}, '${p.symbol}')">
+                            <div class="asset-info">
+                                <span class="symbol">${p.symbol}</span>
+                                <span class="name">Market Asset</span>
+                            </div>
+                            <div class="asset-price">₹${p.price.toFixed(2)}</div>
+                        </div>
+                    `).join('');
+                }
+
+                // 3. Update Portfolio Table (if on portfolio page)
+                const tbody = document.querySelector('#portfolioTable tbody');
+                if (tbody) {
+                    tbody.innerHTML = portfolio.map(item => `
+                        <tr>
+                            <td><strong>${item.symbol}</strong></td>
+                            <td>${item.quantity.toFixed(5)}</td>
+                            <td>₹${item.avg_price.toFixed(2)}</td>
+                            <td>₹${item.current_price.toFixed(2)}</td>
+                            <td>₹${item.current_value.toFixed(2)}</td>
+                            <td class="${item.unrealized_pl >= 0 ? 'pos' : 'neg'}">₹${item.unrealized_pl.toFixed(2)}</td>
+                        </tr>
+                    `).join('');
+                }
+
+                // 4. Update Trade Select (if on trade page and empty)
+                const select = document.getElementById('assetSelect');
+                if (select && select.options.length <= 1) {
+                    pricesData.forEach(p => {
+                        const opt = document.createElement('option');
+                        opt.value = p.asset_id;
+                        opt.text = p.symbol;
+                        select.add(opt);
+                    });
+                }
+
+                // 5. Update Charts
+                if (currentPage === "markets" && selectedAssetId) updateAssetChart();
+                
+            } catch (err) {
+                console.error("Dashboard Refresh Error:", err);
+            }
+        }
+
+        // Auto Refresh with a smarter loop (1 second)
+        async function dashboardLoop() {
+            await refreshDashboard();
+            setTimeout(dashboardLoop, 1000);
+        }
+
+        // Separate slower loop for history charts (5 seconds)
+        async function historyLoop() {
+            if (currentPage === "home") await loadWealthChart();
+            setTimeout(historyLoop, 5000);
+        }
+
+        // Feature Specific Chart Functions
+        async function loadWealthChart() {
+            const res = await fetch('/api/analytics/history');
+            const data = await res.json();
+            const ctx = document.getElementById('wealthChart')?.getContext('2d');
+            if (!ctx) return;
+
+            if (wealthChart) wealthChart.destroy();
+            wealthChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: data.map(d => new Date(d.time).toLocaleTimeString()),
+                    datasets: [{
+                        label: 'Total Net Worth',
+                        data: data.map(d => d.total_value),
+                        borderColor: '#3498db',
+                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 0
+                    }]
+                },
+                options: { 
+                    responsive: true, 
+                    maintainAspectRatio: false,
+                    animation: false // Disable animation for performance
+                }
+            });
+        }
+
+        async function updateAssetChart() {
+            if (!selectedAssetId) return;
+            const res = await fetch(`/api/analytics/price_history/${selectedAssetId}`);
+            const data = await res.json();
+            const ctx = document.getElementById('assetPriceChart')?.getContext('2d');
+            if (!ctx) return;
+
+            if (assetChart) assetChart.destroy();
+            assetChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: data.map(d => new Date(d.time).toLocaleTimeString()),
+                    datasets: [{
+                        label: 'Price',
+                        data: data.map(d => d.price),
+                        borderColor: '#2ecc71',
+                        tension: 0.1,
+                        pointRadius: 0
+                    }]
+                },
+                options: { 
+                    responsive: true, 
+                    maintainAspectRatio: false,
+                    animation: false // Disable animation for performance
+                }
+            });
+        }
+
+        // Trading Logic
+        function updateTradePrice() {
+            const id = document.getElementById('assetSelect').value;
+            const asset = pricesData.find(p => p.asset_id == id);
+            if (asset) {
+                document.getElementById('current-trade-price').innerText = `₹${asset.price.toFixed(2)}`;
+                calculateTotal();
+            }
+        }
+
+        function calculateTotal() {
+            const id = document.getElementById('assetSelect').value;
+            const qty = parseFloat(document.getElementById('quantity').value) || 0;
+            const asset = pricesData.find(p => p.asset_id == id);
+            if (asset) {
+                document.getElementById('estimated-total').innerText = `₹${(asset.price * qty).toFixed(2)}`;
+            }
+        }
+
+        async function selectAsset(id, symbol) {
+            selectedAssetId = id;
+            document.getElementById('selected-asset-title').innerText = `${symbol} Price Trend (Last 20 ticks)`;
+            updateAssetChart();
+        }
+
+        const tradeForm = document.getElementById('tradeForm');
+        if (tradeForm) {
+            tradeForm.onsubmit = async (e) => {
+                e.preventDefault();
+                const assetId = document.getElementById('assetSelect').value;
+                const type = document.querySelector('input[name="orderType"]:checked').value;
+                const qty = parseFloat(document.getElementById('quantity').value);
+
+                // Pre-validation
+                const asset = pricesData.find(p => p.asset_id == assetId);
+                
+                // Fetch latest data for validation
+                const [wRes, pRes] = await Promise.all([fetch('/api/wallet'), fetch('/api/portfolio')]);
+                const wallet = await wRes.json();
+                const portfolio = await pRes.json();
+                
+                if (type === 'buy' && (asset.price * qty) > wallet.balance) {
+                    alert('Insufficient cash balance!'); return;
+                }
+                if (type === 'sell') {
+                    const holding = portfolio.find(i => i.asset_id == assetId);
+                    if (!holding || holding.quantity < qty) {
+                        alert('Insufficient asset quantity!'); return;
+                    }
+                }
+
+                const res = await fetch('/api/order', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ asset_id: assetId, order_type: type, quantity: qty })
+                });
+
+                if (res.ok) {
+                    alert('Trade Executed Successfully!');
+                    await refreshDashboard();
+                } else {
+                    const err = await res.json();
+                    alert(err.error);
+                }
+            };
+        }
+
+        // High-frequency auto-refresh (1 second)
+        const currentPage = "{{ page }}";
+        dashboardLoop();
+        historyLoop();
+    </script>
+</body>
+</html>

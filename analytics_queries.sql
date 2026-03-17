@@ -1,0 +1,55 @@
+-- ==========================================
+-- TEMPORAL ANALYTICS QUERIES (WINDOW FUNCTIONS)
+-- ==========================================
+
+-- 1. Moving Average (7-period simple moving average)
+SELECT 
+    asset_id,
+    time,
+    price,
+    AVG(price) OVER (PARTITION BY asset_id ORDER BY time ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS sma_7
+FROM market_data;
+
+-- 2. Price Change using LAG
+SELECT 
+    asset_id,
+    time,
+    price,
+    LAG(price) OVER (PARTITION BY asset_id ORDER BY time) AS prev_price,
+    (price - LAG(price) OVER (PARTITION BY asset_id ORDER BY time)) / LAG(price) OVER (PARTITION BY asset_id ORDER BY time) * 100 AS pct_change
+FROM market_data;
+
+-- 3. Volatility (Standard Deviation over time)
+SELECT 
+    asset_id,
+    STDDEV(price) OVER (PARTITION BY asset_id ORDER BY time ROWS BETWEEN 20 PRECEDING AND CURRENT ROW) AS volatility
+FROM market_data;
+
+-- 4. Top Profitable Users (Based on realized and unrealized P/L)
+SELECT 
+    u.username,
+    COALESCE(SUM(ps.unrealized_pl), 0) AS total_pl
+FROM users u
+LEFT JOIN portfolio_summary ps ON u.user_id = ps.user_id
+GROUP BY u.user_id, u.username
+ORDER BY total_pl DESC
+LIMIT 10;
+
+-- 5. Most Traded Assets (By Trade Count)
+SELECT 
+    a.symbol,
+    COUNT(t.trade_id) AS trade_count,
+    SUM(t.quantity * t.price) AS volume
+FROM trades t
+JOIN assets a ON t.asset_id = a.asset_id
+GROUP BY a.symbol
+ORDER BY trade_count DESC;
+
+-- 6. Portfolio Value Over Time (Daily/Hourly Aggregation using TimescaleDB time_bucket)
+SELECT 
+    user_id,
+    time_bucket('1 hour', time) AS hour,
+    AVG(total_value) AS avg_value
+FROM portfolio_history
+GROUP BY user_id, hour
+ORDER BY hour;
