@@ -187,6 +187,51 @@ def get_portfolio_history():
     history.reverse()
     return jsonify([{"time": r[0].isoformat(), "total_value": float(r[1])} for r in history])
 
+@app.route("/api/analytics/ohlc/<int:asset_id>", methods=["GET"])
+def get_ohlc_history(asset_id):
+    """Endpoint to fetch historical OHLC data with timeframe support."""
+    timeframe = request.args.get('period', '1M')
+    
+    # Map timeframe to days
+    days_map = {'1M': 30, '3M': 90, '6M': 180, '1Y': 365}
+    days = days_map.get(timeframe, 30)
+    
+    ohlc = database.execute_query(
+        """
+        SELECT bucket, open, high, low, close 
+        FROM market_data_daily 
+        WHERE asset_id = %s AND bucket >= NOW() - INTERVAL '%s day'
+        ORDER BY bucket ASC
+        """,
+        (asset_id, days),
+        fetch=True
+    )
+    
+    # Fallback to raw data if aggregates are empty
+    if not ohlc:
+        ohlc = database.execute_query(
+            """
+            SELECT time_bucket('1 day', time) AS bucket, 
+                   FIRST(price, time) as open, MAX(price) as high, 
+                   MIN(price) as low, LAST(price, time) as close 
+            FROM market_data 
+            WHERE asset_id = %s AND time >= NOW() - INTERVAL '%s day'
+            GROUP BY bucket ORDER BY bucket ASC
+            """,
+            (asset_id, days),
+            fetch=True
+        )
+        
+    return jsonify([
+        {
+            "time": r[0].isoformat(),
+            "open": float(r[1]),
+            "high": float(r[2]),
+            "low": float(r[3]),
+            "close": float(r[4])
+        } for r in ohlc
+    ])
+
 @app.route("/api/analytics/price_history/<int:asset_id>", methods=["GET"])
 def get_price_history(asset_id):
     history = database.execute_query(

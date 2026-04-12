@@ -72,7 +72,7 @@
             {% if page == 'home' %}
             <div class="content-section">
                 <h3>Wealth Growth History</h3>
-                <div style="height: 400px;">
+                <div style="height: 500px; position: relative;">
                     <canvas id="wealthChart"></canvas>
                 </div>
             </div>
@@ -88,7 +88,11 @@
                 </div>
                 <div class="content-section">
                     <h3 id="selected-asset-title">Select an asset to view chart</h3>
-                    <div style="height: 300px;">
+                    <div class="chart-tabs">
+                        <button class="tab-btn active" onclick="setChartPeriod('1D')">1D</button>
+                        <button class="tab-btn" onclick="setChartPeriod('1M')">1M</button>
+                    </div>
+                    <div style="height: 500px; position: relative;">
                         <canvas id="assetPriceChart"></canvas>
                     </div>
                 </div>
@@ -153,8 +157,17 @@
         let wealthChart, assetChart;
         let pricesData = [];
         let selectedAssetId = null;
+        let selectedAssetSymbol = "";
+        let chartPeriod = "1D";
 
-        // Optimized Data Fetchers
+        function setChartPeriod(period) {
+            chartPeriod = period;
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.innerText.includes(period));
+            });
+            if (selectedAssetId) updateAssetChart();
+        }
+
         async function refreshDashboard() {
             try {
                 // Fetch wallet and portfolio together
@@ -186,7 +199,7 @@
                 const list = document.getElementById('market-list');
                 if (list) {
                     list.innerHTML = pricesData.map(p => `
-                        <div class="asset-card" onclick="selectAsset(${p.asset_id}, '${p.symbol}')">
+                        <div class="asset-card ${selectedAssetId === p.asset_id ? 'active' : ''}" onclick="selectAsset(${p.asset_id}, '${p.symbol}')">
                             <div class="asset-info">
                                 <span class="symbol">${p.symbol}</span>
                                 <span class="name">Market Asset</span>
@@ -253,51 +266,166 @@
             wealthChart = new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: data.map(d => new Date(d.time).toLocaleTimeString()),
+                    labels: data.map(d => new Date(d.time).toLocaleDateString()),
                     datasets: [{
-                        label: 'Total Net Worth',
+                        label: 'Total Wealth',
                         data: data.map(d => d.total_value),
-                        borderColor: '#3498db',
-                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                        borderColor: '#00d09c',
+                        borderWidth: 2,
+                        tension: 0.2,
                         fill: true,
-                        tension: 0.3,
-                        pointRadius: 0
+                        backgroundColor: 'rgba(0, 208, 156, 0.05)',
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
+                        pointHoverBackgroundColor: '#00d09c',
+                        pointHoverBorderColor: '#fff',
+                        pointHoverBorderWidth: 2
                     }]
                 },
-                options: { 
-                    responsive: true, 
+                options: {
+                    responsive: true,
                     maintainAspectRatio: false,
-                    animation: false // Disable animation for performance
+                    interaction: { intersect: false, mode: 'index' },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            enabled: true,
+                            backgroundColor: '#1a1c22',
+                            titleColor: '#9b9b9b',
+                            bodyColor: '#ffffff',
+                            borderColor: '#2e3239',
+                            borderWidth: 1,
+                            padding: 12,
+                            displayColors: false,
+                            callbacks: {
+                                label: function(context) {
+                                    return `₹${context.parsed.y.toLocaleString()}`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { display: true, grid: { display: false }, ticks: { color: '#9b9b9b' } },
+                        y: { position: 'right', grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#9b9b9b' } }
+                    }
                 }
             });
         }
 
         async function updateAssetChart() {
             if (!selectedAssetId) return;
-            const res = await fetch(`/api/analytics/price_history/${selectedAssetId}`);
+            
+            const endpoint = chartPeriod === "1D" 
+                ? `/api/analytics/price_history/${selectedAssetId}`
+                : `/api/analytics/ohlc/${selectedAssetId}?period=${chartPeriod}`;
+            
+            const res = await fetch(endpoint);
             const data = await res.json();
-            const ctx = document.getElementById('assetPriceChart')?.getContext('2d');
-            if (!ctx) return;
-
-            if (assetChart) assetChart.destroy();
-            assetChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: data.map(d => new Date(d.time).toLocaleTimeString()),
-                    datasets: [{
-                        label: 'Price',
-                        data: data.map(d => d.price),
-                        borderColor: '#2ecc71',
-                        tension: 0.1,
-                        pointRadius: 0
-                    }]
-                },
-                options: { 
-                    responsive: true, 
-                    maintainAspectRatio: false,
-                    animation: false // Disable animation for performance
+            
+            const labels = data.map(d => {
+                const date = new Date(d.time);
+                if (chartPeriod === "1D") {
+                    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                } else {
+                    return date.toLocaleDateString([], { day: '2-digit', month: 'short' });
                 }
             });
+            
+            const values = data.map(d => chartPeriod === "1D" ? d.price : d.close);
+
+            if (assetChart) {
+                assetChart.data.labels = labels;
+                assetChart.data.datasets[0].data = values;
+                assetChart.data.datasets[0].label = `${selectedAssetSymbol}`;
+                assetChart.update('none');
+            } else {
+                const ctx = document.getElementById('assetPriceChart').getContext('2d');
+                assetChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: `${selectedAssetSymbol}`,
+                            data: values,
+                            borderColor: '#00d09c',
+                            borderWidth: 2,
+                            tension: 0.1,
+                            fill: true,
+                            backgroundColor: 'rgba(0, 208, 156, 0.05)',
+                            pointRadius: 0,
+                            pointHoverRadius: 6,
+                            pointHoverBackgroundColor: '#00d09c',
+                            pointHoverBorderColor: '#fff',
+                            pointHoverBorderWidth: 2
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: {
+                            intersect: false,
+                            mode: 'index',
+                        },
+                        plugins: { 
+                            legend: { display: false },
+                            tooltip: {
+                                enabled: true,
+                                backgroundColor: '#1a1c22',
+                                titleColor: '#9b9b9b',
+                                bodyColor: '#ffffff',
+                                borderColor: '#2e3239',
+                                borderWidth: 1,
+                                padding: 12,
+                                displayColors: false,
+                                callbacks: {
+                                    title: function(context) {
+                                        const d = data[context[0].dataIndex];
+                                        const date = new Date(d.time);
+                                        // Force consistent UTC-based display to avoid "future date" shifts
+                                        return date.toLocaleDateString('en-GB', {
+                                            day: '2-digit',
+                                            month: 'short',
+                                            year: 'numeric',
+                                            hour: '2-digit',
+                                            minute: '2-digit'
+                                        });
+                                    },
+                                    label: function(context) {
+                                        return `₹${context.parsed.y.toLocaleString(undefined, {
+                                            minimumFractionDigits: 2,
+                                            maximumFractionDigits: 2
+                                        })}`;
+                                    }
+                                }
+                            }
+                        },
+                        scales: { 
+                            x: { 
+                                display: true,
+                                grid: { display: false },
+                                ticks: {
+                                    color: '#9b9b9b',
+                                    maxRotation: 0,
+                                    autoSkip: true,
+                                    maxTicksLimit: 8,
+                                    font: { size: 11 }
+                                }
+                            },
+                            y: {
+                                position: 'right',
+                                grid: { color: 'rgba(255,255,255,0.03)' },
+                                ticks: {
+                                    color: '#9b9b9b',
+                                    font: { size: 11 },
+                                    callback: function(value) {
+                                        return '₹' + value.toLocaleString();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
         }
 
         // Trading Logic
@@ -319,9 +447,10 @@
             }
         }
 
-        async function selectAsset(id, symbol) {
+        function selectAsset(id, symbol) {
             selectedAssetId = id;
-            document.getElementById('selected-asset-title').innerText = `${symbol} Price Trend (Last 20 ticks)`;
+            selectedAssetSymbol = symbol;
+            document.getElementById('selected-asset-title').innerText = `${symbol} Market Performance`;
             updateAssetChart();
         }
 

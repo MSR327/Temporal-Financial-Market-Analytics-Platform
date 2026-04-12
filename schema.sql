@@ -12,6 +12,8 @@ DROP TABLE IF EXISTS wallets CASCADE;
 DROP TABLE IF EXISTS assets CASCADE;
 DROP TABLE IF EXISTS users CASCADE;
 DROP VIEW IF EXISTS latest_prices CASCADE;
+DROP TABLE IF EXISTS latest_prices_cache CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS market_data_daily CASCADE;
 DROP VIEW IF EXISTS portfolio_value CASCADE;
 DROP VIEW IF EXISTS profit_loss CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS mv_top_assets CASCADE;
@@ -24,7 +26,7 @@ CREATE TABLE users (
     username TEXT UNIQUE NOT NULL,
     email TEXT UNIQUE NOT NULL, 
     password_hash TEXT NOT NULL, 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP 
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP 
 ); 
 
 CREATE INDEX idx_users_email ON users(email); 
@@ -36,7 +38,7 @@ CREATE TABLE wallets (
     wallet_id SERIAL PRIMARY KEY, 
     user_id INT UNIQUE REFERENCES users(user_id) ON DELETE CASCADE, 
     balance NUMERIC(15,2) DEFAULT 100000.00 CHECK (balance >= 0), 
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP 
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP 
 ); 
 
 CREATE INDEX idx_wallet_user ON wallets(user_id); 
@@ -68,9 +70,29 @@ CREATE TABLE assets (
 INSERT INTO assets (name, symbol, type) VALUES 
 ('Bitcoin', 'BTC', 'crypto'),
 ('Ethereum', 'ETH', 'crypto'),
+('Solana', 'SOL', 'crypto'),
+('Cardano', 'ADA', 'crypto'),
+('Ripple', 'XRP', 'crypto'),
+('Dogecoin', 'DOGE', 'crypto'),
+('Polkadot', 'DOT', 'crypto'),
+('Chainlink', 'LINK', 'crypto'),
+('Polygon', 'MATIC', 'crypto'),
+('Avalanche', 'AVAX', 'crypto'),
+('Litecoin', 'LTC', 'crypto'),
+('Shiba Inu', 'SHIB', 'crypto'),
 ('Apple Inc.', 'AAPL', 'stock'),
 ('Tesla Inc.', 'TSLA', 'stock'),
-('NVIDIA Corp.', 'NVDA', 'stock');
+('NVIDIA Corp.', 'NVDA', 'stock'),
+('Microsoft Corp.', 'MSFT', 'stock'),
+('Amazon.com Inc.', 'AMZN', 'stock'),
+('Alphabet Inc. (Google)', 'GOOGL', 'stock'),
+('Meta Platforms Inc. (Facebook)', 'META', 'stock'),
+('Netflix Inc.', 'NFLX', 'stock'),
+('Walt Disney Co.', 'DIS', 'stock'),
+('Adobe Inc.', 'ADBE', 'stock'),
+('Intel Corp.', 'INTC', 'stock'),
+('Advanced Micro Devices Inc. (AMD)', 'AMD', 'stock'),
+('Salesforce Inc.', 'CRM', 'stock');
 
 -- ========================= 
 -- 4. MARKET DATA & LATEST PRICES CACHE
@@ -78,11 +100,32 @@ INSERT INTO assets (name, symbol, type) VALUES
 CREATE TABLE market_data ( 
     asset_id INT REFERENCES assets(asset_id) ON DELETE CASCADE, 
     price NUMERIC(15,2) NOT NULL CHECK (price > 0), 
-    time TIMESTAMP NOT NULL, 
-    source TEXT CHECK (source IN ('api','simulated')) DEFAULT 'simulated'
+    time TIMESTAMPTZ NOT NULL, 
+    source TEXT DEFAULT 'simulated'
 ); 
 
 SELECT create_hypertable('market_data', 'time'); 
+
+-- Continuous Aggregate for Daily OHLC (Candlesticks)
+-- Note: Created WITH NO DATA to avoid transaction errors
+CREATE MATERIALIZED VIEW market_data_daily
+WITH (timescaledb.continuous) AS
+SELECT
+  time_bucket('1 day', time) AS bucket,
+  asset_id,
+  MIN(price) AS low,
+  MAX(price) AS high,
+  FIRST(price, time) AS open,
+  LAST(price, time) AS close
+FROM market_data
+GROUP BY bucket, asset_id
+WITH NO DATA;
+
+-- Policy to refresh the aggregate daily
+SELECT add_continuous_aggregate_policy('market_data_daily',
+  start_offset => INTERVAL '1 month',
+  end_offset => INTERVAL '1 hour',
+  schedule_interval => INTERVAL '1 day');
 
 CREATE INDEX idx_market_asset_time ON market_data (asset_id, time DESC); 
 CREATE INDEX idx_market_time ON market_data(time DESC); 
@@ -91,7 +134,7 @@ CREATE INDEX idx_market_time ON market_data(time DESC);
 CREATE TABLE latest_prices_cache (
     asset_id INT PRIMARY KEY REFERENCES assets(asset_id) ON DELETE CASCADE,
     price NUMERIC(15,2) NOT NULL,
-    time TIMESTAMP NOT NULL
+    time TIMESTAMPTZ NOT NULL
 );
 
 -- Trigger to keep cache updated
@@ -134,7 +177,7 @@ CREATE TABLE orders (
     price NUMERIC(15,5) NOT NULL CHECK (price > 0), 
     order_type TEXT CHECK (order_type IN ('buy', 'sell')) NOT NULL, 
     status TEXT CHECK (status IN ('open', 'filled', 'cancelled')) DEFAULT 'open', 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (order_id, created_at)
 ); 
 
@@ -148,7 +191,7 @@ CREATE TABLE trades(
     trade_type TEXT CHECK (trade_type IN ('buy','sell')), 
     price NUMERIC(15,5) NOT NULL CHECK (price > 0), 
     quantity NUMERIC(15,5) NOT NULL CHECK (quantity > 0), 
-    executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    executed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (trade_id, executed_at)
 ); 
 
@@ -269,7 +312,7 @@ $$ LANGUAGE plpgsql;
 -- 9. PORTFOLIO HISTORY (PARTITIONED)
 -- ========================= 
 CREATE TABLE portfolio_history ( 
-    time TIMESTAMP NOT NULL, 
+    time TIMESTAMPTZ NOT NULL, 
     user_id INT REFERENCES users(user_id) ON DELETE CASCADE, 
     total_value NUMERIC 
 ); 
@@ -302,7 +345,8 @@ LEFT JOIN latest_prices lp ON p.asset_id = lp.asset_id;
 
 CREATE MATERIALIZED VIEW mv_top_assets AS 
 SELECT asset_id, SUM(quantity * price) AS total_traded_value 
-FROM trades GROUP BY asset_id ORDER BY total_traded_value DESC LIMIT 5; 
+FROM trades GROUP BY asset_id ORDER BY total_traded_value DESC LIMIT 5
+WITH NO DATA; 
 
 CREATE OR REPLACE FUNCTION deposit_money(p_user_id INT, p_amount NUMERIC) RETURNS VOID AS $$
 BEGIN UPDATE wallets SET balance = balance + p_amount WHERE user_id = p_user_id; END; $$ LANGUAGE plpgsql;
