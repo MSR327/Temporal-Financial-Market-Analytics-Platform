@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Temporal - DBMS Project</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="sidebar">
+        <div class="sidebar-header">
+            📈 TEMPORAL
+        </div>
+        <nav class="sidebar-nav">
+            <a href="{{ url_for('dashboard') }}" class="nav-item {{ 'active' if page == 'home' else '' }}">
+                <span class="icon">🏠</span> Overview
+            </a>
+            <a href="{{ url_for('markets') }}" class="nav-item {{ 'active' if page == 'markets' else '' }}">
+                <span class="icon">📊</span> Market Data
+            </a>
+            <a href="{{ url_for('portfolio_page') }}" class="nav-item {{ 'active' if page == 'portfolio' else '' }}">
+                <span class="icon">💼</span> My Portfolio
+            </a>
+            <a href="{{ url_for('trade_page') }}" class="nav-item {{ 'active' if page == 'trade' else '' }}">
+                <span class="icon">🔄</span> Trade
+            </a>
+            <a href="{{ url_for('transactions_page') }}" class="nav-item {{ 'active' if page == 'transactions' else '' }}">
+                <span class="icon">📜</span> Transactions
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <a href="{{ url_for('logout') }}" class="nav-item">
+                <span class="icon">🚪</span> Logout
+            </a>
+        </div>
+    </div>
+
+    {% block content %}{% endblock %}
+</body>
+</html>

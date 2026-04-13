@@ -1,505 +1,490 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Temporal Market Platform</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-</head>
-<body>
-    <!-- Sidebar Menu -->
-    <aside class="sidebar">
-        <div class="sidebar-header">
-            <i class="fas fa-chart-line"></i> TEMPORAL
-        </div>
-        <nav class="sidebar-nav">
-            <a href="/dashboard" class="nav-item {{ 'active' if page == 'home' }}">
-                <i class="fas fa-home"></i> Overview
-            </a>
-            <a href="/markets" class="nav-item {{ 'active' if page == 'markets' }}">
-                <i class="fas fa-chart-area"></i> Market Data
-            </a>
-            <a href="/portfolio" class="nav-item {{ 'active' if page == 'portfolio' }}">
-                <i class="fas fa-wallet"></i> My Portfolio
-            </a>
-            <a href="/trade" class="nav-item {{ 'active' if page == 'trade' }}">
-                <i class="fas fa-exchange-alt"></i> Trade
-            </a>
-        </nav>
-        <div class="sidebar-footer">
-            <a href="/api/logout" class="nav-item">
-                <i class="fas fa-sign-out-alt"></i> Logout
-            </a>
-        </div>
-    </aside>
+{% extends "base.html" %}
 
-    <!-- Main Content Area -->
-    <main class="main-wrapper">
-        <header class="header-top">
-            <h1>
-                {% if page == 'home' %}Account Overview
-                {% elif page == 'markets' %}Market Analytics
-                {% elif page == 'portfolio' %}Portfolio Holdings
-                {% elif page == 'trade' %}Trading Terminal
-                {% endif %}
-            </h1>
-            <div class="user-badge">
-                <i class="fas fa-user-circle"></i> {{ username }}
-            </div>
-        </header>
+{% block content %}
+<div class="main-wrapper">
+    <div class="header-top">
+        <h1>{{ 'Overview' if page == 'home' else page|capitalize }}</h1>
+        <div class="user-badge">
+            <span class="icon">👤</span>
+            <span>{{ session['username'] }}</span>
+        </div>
+    </div>
 
-        <!-- Common Stats Bar (Always visible) -->
-        <div class="stats-grid">
-            <div class="stat-card">
-                <h3>Cash Balance</h3>
-                <p class="value" id="global-wallet">₹0.00</p>
+    <div class="stats-grid">
+        <div class="stat-card">
+            <h3>Wallet Balance</h3>
+            <p class="value" id="global-wallet">₹0.00</p>
+        </div>
+        <div class="stat-card">
+            <h3>Portfolio Value</h3>
+            <p class="value" id="global-portfolio">₹0.00</p>
+        </div>
+        <div class="stat-card">
+            <h3>Total P/L</h3>
+            <p class="value" id="global-pl">₹0.00</p>
+        </div>
+    </div>
+
+    <div class="page-content">
+        {% if page == 'home' %}
+        <div class="content-section">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                <h3 style="margin: 0;">Portfolio Analysis</h3>
+                <div class="chart-tabs" style="margin: 0;">
+                    <button class="tab-btn wealth-tab active" onclick="setWealthPeriod('1M')">1M</button>
+                    <button class="tab-btn wealth-tab" onclick="setWealthPeriod('3M')">3M</button>
+                    <button class="tab-btn wealth-tab" onclick="setWealthPeriod('6M')">6M</button>
+                    <button class="tab-btn wealth-tab" onclick="setWealthPeriod('1Y')">1Y</button>
+                </div>
             </div>
-            <div class="stat-card">
-                <h3>Portfolio Value</h3>
-                <p class="value" id="global-portfolio">₹0.00</p>
+
+            <div class="wealth-summary">
+                <div class="wealth-item">
+                    <h4>Current Value</h4>
+                    <div class="value" id="wealth-current">₹0.00</div>
+                </div>
+                <div class="wealth-item">
+                    <h4>Total Invested</h4>
+                    <div class="value" id="wealth-invested">₹0.00</div>
+                </div>
+                <div class="wealth-item">
+                    <h4>Total Returns</h4>
+                    <div class="value" id="wealth-returns">₹0.00 (0.00%)</div>
+                </div>
             </div>
-            <div class="stat-card">
-                <h3>Total Profit/Loss</h3>
-                <p class="value" id="global-pl">₹0.00</p>
+
+            <div style="height: 450px; position: relative;">
+                <canvas id="wealthChart"></canvas>
             </div>
         </div>
+        {% endif %}
 
-        <!-- Dynamic Content -->
-        <div id="page-content">
-            
-            {% if page == 'home' %}
+        {% if page == 'markets' %}
+        <div class="main-grid">
+            <div class="content-section" style="padding: 0;">
+                <div style="padding: 1.5rem 1.5rem 0.5rem 1.5rem;">
+                    <h3 style="margin: 0 0 1rem 0;">Market Assets</h3>
+                </div>
+                <div class="search-container">
+                    <input type="text" id="assetSearch" class="search-input" placeholder="Search stocks or crypto..." oninput="filterAssets()">
+                </div>
+                <div class="market-grid" id="market-list">
+                    <!-- Loaded via JS -->
+                </div>
+            </div>
             <div class="content-section">
-                <h3>Wealth Growth History</h3>
+                <h3 id="selected-asset-title">Select an asset to view chart</h3>
+                <div class="chart-tabs">
+                    <button class="tab-btn market-tab active" onclick="setChartPeriod('1D')">1D</button>
+                    <button class="tab-btn market-tab" onclick="setChartPeriod('1M')">1M</button>
+                    <button class="tab-btn market-tab" onclick="setChartPeriod('3M')">3M</button>
+                    <button class="tab-btn market-tab" onclick="setChartPeriod('6M')">6M</button>
+                    <button class="tab-btn market-tab" onclick="setChartPeriod('1Y')">1Y</button>
+                </div>
                 <div style="height: 500px; position: relative;">
-                    <canvas id="wealthChart"></canvas>
+                    <canvas id="assetPriceChart"></canvas>
                 </div>
             </div>
-            {% endif %}
-
-            {% if page == 'markets' %}
-            <div class="main-grid">
-                <div class="content-section">
-                    <h3>All Assets</h3>
-                    <div class="market-grid" id="market-list">
-                        <!-- Loaded via JS -->
-                    </div>
-                </div>
-                <div class="content-section">
-                    <h3 id="selected-asset-title">Select an asset to view chart</h3>
-                    <div class="chart-tabs">
-                        <button class="tab-btn active" onclick="setChartPeriod('1D')">1D</button>
-                        <button class="tab-btn" onclick="setChartPeriod('1M')">1M</button>
-                    </div>
-                    <div style="height: 500px; position: relative;">
-                        <canvas id="assetPriceChart"></canvas>
-                    </div>
-                </div>
-            </div>
-            {% endif %}
-
-            {% if page == 'portfolio' %}
-            <div class="content-section">
-                <h3>Current Holdings</h3>
-                <table id="portfolioTable">
-                    <thead>
-                        <tr>
-                            <th>Symbol</th>
-                            <th>Quantity</th>
-                            <th>Avg Buy Price</th>
-                            <th>Current Price</th>
-                            <th>Current Value</th>
-                            <th>P/L</th>
-                        </tr>
-                    </thead>
-                    <tbody><!-- Loaded via JS --></tbody>
-                </table>
-            </div>
-            {% endif %}
-
-            {% if page == 'trade' %}
-            <div class="content-section">
-                <div class="trade-form">
-                    <h3>Place Market Order</h3>
-                    <form id="tradeForm">
-                        <div class="form-group">
-                            <label>Asset</label>
-                            <select id="assetSelect" required onchange="updateTradePrice()">
-                                <option value="">Select Asset</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Transaction Type</label>
-                            <div class="trade-type">
-                                <label><input type="radio" name="orderType" value="buy" checked> Buy</label>
-                                <label><input type="radio" name="orderType" value="sell"> Sell</label>
-                            </div>
-                        </div>
-                        <div class="form-group">
-                            <label>Quantity</label>
-                            <input type="number" id="quantity" step="0.00001" placeholder="0.00" required oninput="calculateTotal()">
-                        </div>
-                        <div class="form-group">
-                            <p>Current Price: <span id="current-trade-price">₹0.00</span></p>
-                            <p>Estimated Total: <span id="estimated-total">₹0.00</span></p>
-                        </div>
-                        <button type="submit" class="trade-btn">Execute Trade</button>
-                    </form>
-                </div>
-            </div>
-            {% endif %}
-
         </div>
-    </main>
+        {% endif %}
 
-    <script>
-        let wealthChart, assetChart;
-        let pricesData = [];
-        let selectedAssetId = null;
-        let selectedAssetSymbol = "";
-        let chartPeriod = "1D";
+        {% if page == 'portfolio' %}
+        <div class="content-section">
+            <h3>Current Holdings</h3>
+            <table id="portfolioTable">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Quantity</th>
+                        <th>Avg Buy Price</th>
+                        <th>Current Price</th>
+                        <th>Current Value</th>
+                        <th>P/L</th>
+                    </tr>
+                </thead>
+                <tbody><!-- Loaded via JS --></tbody>
+            </table>
+        </div>
+        {% endif %}
 
-        function setChartPeriod(period) {
-            chartPeriod = period;
-            document.querySelectorAll('.tab-btn').forEach(btn => {
-                btn.classList.toggle('active', btn.innerText.includes(period));
-            });
-            if (selectedAssetId) updateAssetChart();
-        }
-
-        async function refreshDashboard() {
-            try {
-                // Fetch wallet and portfolio together
-                const [wRes, pRes, mRes] = await Promise.all([
-                    fetch('/api/wallet'),
-                    fetch('/api/portfolio'),
-                    fetch('/api/prices')
-                ]);
-
-                const wallet = await wRes.json();
-                const portfolio = await pRes.json();
-                pricesData = await mRes.json();
-
-                // 1. Update Global Stats
-                let totalValue = 0;
-                let totalPL = 0;
-                portfolio.forEach(i => {
-                    totalValue += i.current_value;
-                    totalPL += i.unrealized_pl;
-                });
-
-                document.getElementById('global-wallet').innerText = `₹${wallet.balance.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
-                document.getElementById('global-portfolio').innerText = `₹${totalValue.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
-                const plElem = document.getElementById('global-pl');
-                plElem.innerText = `₹${totalPL.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
-                plElem.className = `value ${totalPL >= 0 ? 'pos' : 'neg'}`;
-
-                // 2. Update Market List (if on markets page)
-                const list = document.getElementById('market-list');
-                if (list) {
-                    list.innerHTML = pricesData.map(p => `
-                        <div class="asset-card ${selectedAssetId === p.asset_id ? 'active' : ''}" onclick="selectAsset(${p.asset_id}, '${p.symbol}')">
-                            <div class="asset-info">
-                                <span class="symbol">${p.symbol}</span>
-                                <span class="name">Market Asset</span>
-                            </div>
-                            <div class="asset-price">₹${p.price.toFixed(2)}</div>
+        {% if page == 'trade' %}
+        <div class="content-section">
+            <div class="trade-form">
+                <h3>Place Market Order</h3>
+                <form id="tradeForm">
+                    <div class="form-group">
+                        <label>Asset</label>
+                        <select id="assetSelect" required onchange="updateTradePrice()">
+                            <option value="">Select Asset</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Transaction Type</label>
+                        <div class="trade-type">
+                            <label><input type="radio" name="orderType" value="buy" checked> Buy</label>
+                            <label><input type="radio" name="orderType" value="sell"> Sell</label>
                         </div>
-                    `).join('');
-                }
+                    </div>
+                    <div class="form-group">
+                        <label>Quantity</label>
+                        <input type="number" id="quantity" step="0.00001" placeholder="0.00" required oninput="calculateTotal()">
+                    </div>
+                    <div class="form-group">
+                        <p>Current Price: <span id="current-trade-price">₹0.00</span></p>
+                        <p>Estimated Total: <span id="estimated-total">₹0.00</span></p>
+                    </div>
+                    <button type="submit" class="trade-btn">Execute Trade</button>
+                </form>
+            </div>
+        </div>
+        {% endif %}
 
-                // 3. Update Portfolio Table (if on portfolio page)
-                const tbody = document.querySelector('#portfolioTable tbody');
-                if (tbody) {
-                    tbody.innerHTML = portfolio.map(item => `
-                        <tr>
-                            <td><strong>${item.symbol}</strong></td>
-                            <td>${item.quantity.toFixed(5)}</td>
-                            <td>₹${item.avg_price.toFixed(2)}</td>
-                            <td>₹${item.current_price.toFixed(2)}</td>
-                            <td>₹${item.current_value.toFixed(2)}</td>
-                            <td class="${item.unrealized_pl >= 0 ? 'pos' : 'neg'}">₹${item.unrealized_pl.toFixed(2)}</td>
-                        </tr>
-                    `).join('');
-                }
+        {% if page == 'transactions' %}
+        <div class="content-section">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                <h3 style="margin: 0;">Transaction History</h3>
+                <button class="tab-btn" onclick="loadTransactions()">Refresh</button>
+            </div>
+            <table id="transactionTable">
+                <thead>
+                    <tr>
+                        <th>Date & Time</th>
+                        <th>Symbol</th>
+                        <th>Type</th>
+                        <th>Quantity</th>
+                        <th>Price</th>
+                        <th>Total</th>
+                    </tr>
+                </thead>
+                <tbody id="transaction-body"><!-- Loaded via JS --></tbody>
+            </table>
+        </div>
+        {% endif %}
 
-                // 4. Update Trade Select (if on trade page and empty)
-                const select = document.getElementById('assetSelect');
-                if (select && select.options.length <= 1) {
-                    pricesData.forEach(p => {
-                        const opt = document.createElement('option');
-                        opt.value = p.asset_id;
-                        opt.text = p.symbol;
-                        select.add(opt);
-                    });
-                }
+    </div>
+</div>
 
-                // 5. Update Charts
-                if (currentPage === "markets" && selectedAssetId) updateAssetChart();
-                
-            } catch (err) {
-                console.error("Dashboard Refresh Error:", err);
+<script>
+    const currentPage = "{{ page }}";
+    let wealthChart, assetChart;
+    let pricesData = [];
+    let selectedAssetId = null;
+    let selectedAssetSymbol = "";
+    let chartPeriod = "1D";
+    let wealthPeriod = "1M";
+
+    function setChartPeriod(period) {
+        chartPeriod = period;
+        document.querySelectorAll('.market-tab').forEach(btn => {
+            btn.classList.toggle('active', btn.innerText === period);
+        });
+        if (selectedAssetId) updateAssetChart();
+    }
+
+    function setWealthPeriod(period) {
+        wealthPeriod = period;
+        document.querySelectorAll('.wealth-tab').forEach(btn => {
+            btn.classList.toggle('active', btn.innerText === period);
+        });
+        loadWealthChart();
+    }
+
+    function filterAssets() {
+        const query = document.getElementById('assetSearch').value.toLowerCase();
+        const list = document.getElementById('market-list');
+        if (!list) return;
+
+        const filtered = pricesData.filter(p => 
+            p.symbol.toLowerCase().includes(query)
+        );
+
+        list.innerHTML = filtered.map(p => `
+            <div class="asset-card ${selectedAssetId === p.asset_id ? 'active' : ''}" onclick="selectAsset(${p.asset_id}, '${p.symbol}')">
+                <div class="asset-info">
+                    <span class="symbol">${p.symbol}</span>
+                    <span class="name">Market Asset</span>
+                </div>
+                <div class="asset-price">₹${p.price.toFixed(2)}</div>
+            </div>
+        `).join('');
+    }
+
+    async function loadWealthStats() {
+        const res = await fetch('/api/portfolio/stats');
+        const stats = await res.json();
+        
+        if (currentPage === 'home') {
+            document.getElementById('wealth-current').innerText = `₹${stats.current_value.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+            document.getElementById('wealth-invested').innerText = `₹${stats.invested.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+            
+            const returns = stats.current_value - stats.invested;
+            const returnsPct = stats.invested > 0 ? (returns / stats.invested) * 100 : 0;
+            const returnsElem = document.getElementById('wealth-returns');
+            returnsElem.innerText = `₹${returns.toLocaleString(undefined, {minimumFractionDigits: 2})} (${returnsPct.toFixed(2)}%)`;
+            returnsElem.className = `value ${returns >= 0 ? 'pos' : 'neg'}`;
+        }
+    }
+
+    async function loadTransactions() {
+        const res = await fetch('/api/transactions');
+        const data = await res.json();
+        const tbody = document.getElementById('transaction-body');
+        if (!tbody) return;
+
+        tbody.innerHTML = data.map(t => `
+            <tr>
+                <td>${new Date(t.time).toLocaleString()}</td>
+                <td><strong>${t.symbol}</strong></td>
+                <td><span class="badge ${t.type}">${t.type.toUpperCase()}</span></td>
+                <td>${t.quantity.toFixed(5)}</td>
+                <td>₹${t.price.toFixed(2)}</td>
+                <td>₹${t.total.toFixed(2)}</td>
+            </tr>
+        `).join('') || '<tr><td colspan="6" style="text-align:center">No transactions yet</td></tr>';
+    }
+
+    async function refreshDashboard() {
+        try {
+            const [wRes, pRes, mRes] = await Promise.all([
+                fetch('/api/wallet'),
+                fetch('/api/portfolio'),
+                fetch('/api/prices')
+            ]);
+
+            const wallet = await wRes.json();
+            const portfolio = await pRes.json();
+            pricesData = await mRes.json();
+
+            document.getElementById('global-wallet').innerText = `₹${wallet.balance.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+            
+            let totalVal = 0;
+            let totalPL = 0;
+            portfolio.forEach(i => {
+                totalVal += i.current_value;
+                totalPL += i.unrealized_pl;
+            });
+
+            document.getElementById('global-portfolio').innerText = `₹${totalVal.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+            const plElem = document.getElementById('global-pl');
+            plElem.innerText = `₹${totalPL.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+            plElem.className = `value ${totalPL >= 0 ? 'pos' : 'neg'}`;
+
+            if (currentPage === "markets") {
+                filterAssets(); // Keep search filter active
             }
+
+            const tbody = document.querySelector('#portfolioTable tbody');
+            if (tbody) {
+                tbody.innerHTML = portfolio.map(item => `
+                    <tr>
+                        <td><strong>${item.symbol}</strong></td>
+                        <td>${item.quantity.toFixed(5)}</td>
+                        <td>₹${item.avg_price.toFixed(2)}</td>
+                        <td>₹${item.current_price.toFixed(2)}</td>
+                        <td>₹${item.current_value.toFixed(2)}</td>
+                        <td class="${item.unrealized_pl >= 0 ? 'pos' : 'neg'}">₹${item.unrealized_pl.toFixed(2)}</td>
+                    </tr>
+                `).join('');
+            }
+
+            const select = document.getElementById('assetSelect');
+            if (select && select.options.length <= 1) {
+                pricesData.forEach(p => {
+                    const opt = document.createElement('option');
+                    opt.value = p.asset_id;
+                    opt.text = p.symbol;
+                    select.add(opt);
+                });
+            }
+
+            if (currentPage === "home") loadWealthStats();
+            if (currentPage === "markets" && selectedAssetId) updateAssetChart();
+            if (currentPage === "transactions") loadTransactions();
+            
+        } catch (err) {
+            console.error("Refresh Error:", err);
         }
+    }
 
-        // Auto Refresh with a smarter loop (1 second)
-        async function dashboardLoop() {
-            await refreshDashboard();
-            setTimeout(dashboardLoop, 1000);
-        }
+    async function loadWealthChart() {
+        const res = await fetch(`/api/analytics/history?period=${wealthPeriod}`);
+        const data = await res.json();
+        const ctx = document.getElementById('wealthChart')?.getContext('2d');
+        if (!ctx) return;
 
-        // Separate slower loop for history charts (5 seconds)
-        async function historyLoop() {
-            if (currentPage === "home") await loadWealthChart();
-            setTimeout(historyLoop, 5000);
-        }
+        if (wealthChart) wealthChart.destroy();
+        wealthChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: data.map(d => {
+                    const date = new Date(d.time);
+                    if (wealthPeriod === '1Y') {
+                        return date.toLocaleDateString([], { month: 'short', year: '2-digit' });
+                    }
+                    return date.toLocaleDateString([], { day: '2-digit', month: 'short' });
+                }),
+                datasets: [{
+                    label: 'Total Wealth',
+                    data: data.map(d => d.total_value),
+                    borderColor: '#00d09c',
+                    borderWidth: 2,
+                    tension: 0.2,
+                    fill: true,
+                    backgroundColor: 'rgba(0, 208, 156, 0.05)',
+                    pointRadius: 0,
+                    pointHoverRadius: 6
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    tooltip: {
+                        callbacks: {
+                            title: (ctx) => {
+                                const d = data[ctx[0].dataIndex];
+                                return new Date(d.time).toLocaleDateString([], { 
+                                    day: '2-digit', 
+                                    month: 'short', 
+                                    year: 'numeric' 
+                                });
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { 
+                        display: true, 
+                        grid: { display: false },
+                        ticks: {
+                            maxRotation: 0,
+                            autoSkip: true,
+                            maxTicksLimit: wealthPeriod === '1Y' ? 12 : 8
+                        }
+                    },
+                    y: { position: 'right', grid: { color: 'rgba(255,255,255,0.03)' } }
+                }
+            }
+        });
+    }
 
-        // Feature Specific Chart Functions
-        async function loadWealthChart() {
-            const res = await fetch('/api/analytics/history');
-            const data = await res.json();
-            const ctx = document.getElementById('wealthChart')?.getContext('2d');
-            if (!ctx) return;
+    async function updateAssetChart() {
+        if (!selectedAssetId) return;
+        const endpoint = chartPeriod === "1D" 
+            ? `/api/analytics/price_history/${selectedAssetId}`
+            : `/api/analytics/ohlc/${selectedAssetId}?period=${chartPeriod}`;
+        
+        const res = await fetch(endpoint);
+        const data = await res.json();
+        
+        const labels = data.map(d => {
+            const date = new Date(d.time);
+            return chartPeriod === "1D" 
+                ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
+                : date.toLocaleDateString([], { day: '2-digit', month: 'short' });
+        });
+        const values = data.map(d => chartPeriod === "1D" ? d.price : d.close);
 
-            if (wealthChart) wealthChart.destroy();
-            wealthChart = new Chart(ctx, {
+        if (assetChart) {
+            assetChart.data.labels = labels;
+            assetChart.data.datasets[0].data = values;
+            assetChart.update('none');
+        } else {
+            const ctx = document.getElementById('assetPriceChart').getContext('2d');
+            assetChart = new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: data.map(d => new Date(d.time).toLocaleDateString()),
+                    labels: labels,
                     datasets: [{
-                        label: 'Total Wealth',
-                        data: data.map(d => d.total_value),
+                        label: selectedAssetSymbol,
+                        data: values,
                         borderColor: '#00d09c',
                         borderWidth: 2,
-                        tension: 0.2,
                         fill: true,
                         backgroundColor: 'rgba(0, 208, 156, 0.05)',
                         pointRadius: 0,
-                        pointHoverRadius: 6,
-                        pointHoverBackgroundColor: '#00d09c',
-                        pointHoverBorderColor: '#fff',
-                        pointHoverBorderWidth: 2
+                        pointHoverRadius: 6
                     }]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    interaction: { intersect: false, mode: 'index' },
                     plugins: {
-                        legend: { display: false },
                         tooltip: {
-                            enabled: true,
-                            backgroundColor: '#1a1c22',
-                            titleColor: '#9b9b9b',
-                            bodyColor: '#ffffff',
-                            borderColor: '#2e3239',
-                            borderWidth: 1,
-                            padding: 12,
-                            displayColors: false,
                             callbacks: {
-                                label: function(context) {
-                                    return `₹${context.parsed.y.toLocaleString()}`;
+                                title: (ctx) => {
+                                    const d = data[ctx[0].dataIndex];
+                                    return new Date(d.time).toLocaleString([], {
+                                        day: '2-digit', month: 'short', year: 'numeric',
+                                        hour: '2-digit', minute: '2-digit'
+                                    });
                                 }
                             }
                         }
                     },
                     scales: {
-                        x: { display: true, grid: { display: false }, ticks: { color: '#9b9b9b' } },
-                        y: { position: 'right', grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#9b9b9b' } }
+                        x: { display: true, grid: { display: false } },
+                        y: { position: 'right', grid: { color: 'rgba(255,255,255,0.03)' } }
                     }
                 }
             });
         }
+    }
 
-        async function updateAssetChart() {
-            if (!selectedAssetId) return;
-            
-            const endpoint = chartPeriod === "1D" 
-                ? `/api/analytics/price_history/${selectedAssetId}`
-                : `/api/analytics/ohlc/${selectedAssetId}?period=${chartPeriod}`;
-            
-            const res = await fetch(endpoint);
-            const data = await res.json();
-            
-            const labels = data.map(d => {
-                const date = new Date(d.time);
-                if (chartPeriod === "1D") {
-                    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                } else {
-                    return date.toLocaleDateString([], { day: '2-digit', month: 'short' });
-                }
+    function selectAsset(id, symbol) {
+        selectedAssetId = id;
+        selectedAssetSymbol = symbol;
+        document.getElementById('selected-asset-title').innerText = `${symbol} Market Performance`;
+        updateAssetChart();
+    }
+
+    function updateTradePrice() {
+        const assetId = document.getElementById('assetSelect').value;
+        const asset = pricesData.find(p => p.asset_id == assetId);
+        if (asset) {
+            document.getElementById('current-trade-price').innerText = `₹${asset.price.toFixed(2)}`;
+            calculateTotal();
+        }
+    }
+
+    function calculateTotal() {
+        const assetId = document.getElementById('assetSelect').value;
+        const qty = parseFloat(document.getElementById('quantity').value) || 0;
+        const asset = pricesData.find(p => p.asset_id == assetId);
+        if (asset) {
+            const total = asset.price * qty;
+            document.getElementById('estimated-total').innerText = `₹${total.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+        }
+    }
+
+    const tradeForm = document.getElementById('tradeForm');
+    if (tradeForm) {
+        tradeForm.onsubmit = async (e) => {
+            e.preventDefault();
+            const assetId = document.getElementById('assetSelect').value;
+            const type = document.querySelector('input[name="orderType"]:checked').value;
+            const qty = parseFloat(document.getElementById('quantity').value);
+
+            const res = await fetch('/api/order', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ asset_id: assetId, order_type: type, quantity: qty })
             });
-            
-            const values = data.map(d => chartPeriod === "1D" ? d.price : d.close);
 
-            if (assetChart) {
-                assetChart.data.labels = labels;
-                assetChart.data.datasets[0].data = values;
-                assetChart.data.datasets[0].label = `${selectedAssetSymbol}`;
-                assetChart.update('none');
+            if (res.ok) {
+                alert('Trade Executed Successfully!');
+                refreshDashboard();
             } else {
-                const ctx = document.getElementById('assetPriceChart').getContext('2d');
-                assetChart = new Chart(ctx, {
-                    type: 'line',
-                    data: {
-                        labels: labels,
-                        datasets: [{
-                            label: `${selectedAssetSymbol}`,
-                            data: values,
-                            borderColor: '#00d09c',
-                            borderWidth: 2,
-                            tension: 0.1,
-                            fill: true,
-                            backgroundColor: 'rgba(0, 208, 156, 0.05)',
-                            pointRadius: 0,
-                            pointHoverRadius: 6,
-                            pointHoverBackgroundColor: '#00d09c',
-                            pointHoverBorderColor: '#fff',
-                            pointHoverBorderWidth: 2
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        interaction: {
-                            intersect: false,
-                            mode: 'index',
-                        },
-                        plugins: { 
-                            legend: { display: false },
-                            tooltip: {
-                                enabled: true,
-                                backgroundColor: '#1a1c22',
-                                titleColor: '#9b9b9b',
-                                bodyColor: '#ffffff',
-                                borderColor: '#2e3239',
-                                borderWidth: 1,
-                                padding: 12,
-                                displayColors: false,
-                                callbacks: {
-                                    title: function(context) {
-                                        const d = data[context[0].dataIndex];
-                                        const date = new Date(d.time);
-                                        // Force consistent UTC-based display to avoid "future date" shifts
-                                        return date.toLocaleDateString('en-GB', {
-                                            day: '2-digit',
-                                            month: 'short',
-                                            year: 'numeric',
-                                            hour: '2-digit',
-                                            minute: '2-digit'
-                                        });
-                                    },
-                                    label: function(context) {
-                                        return `₹${context.parsed.y.toLocaleString(undefined, {
-                                            minimumFractionDigits: 2,
-                                            maximumFractionDigits: 2
-                                        })}`;
-                                    }
-                                }
-                            }
-                        },
-                        scales: { 
-                            x: { 
-                                display: true,
-                                grid: { display: false },
-                                ticks: {
-                                    color: '#9b9b9b',
-                                    maxRotation: 0,
-                                    autoSkip: true,
-                                    maxTicksLimit: 8,
-                                    font: { size: 11 }
-                                }
-                            },
-                            y: {
-                                position: 'right',
-                                grid: { color: 'rgba(255,255,255,0.03)' },
-                                ticks: {
-                                    color: '#9b9b9b',
-                                    font: { size: 11 },
-                                    callback: function(value) {
-                                        return '₹' + value.toLocaleString();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
+                const err = await res.json();
+                alert(err.error || 'Trade failed');
             }
-        }
+        };
+    }
 
-        // Trading Logic
-        function updateTradePrice() {
-            const id = document.getElementById('assetSelect').value;
-            const asset = pricesData.find(p => p.asset_id == id);
-            if (asset) {
-                document.getElementById('current-trade-price').innerText = `₹${asset.price.toFixed(2)}`;
-                calculateTotal();
-            }
-        }
+    async function dashboardLoop() { await refreshDashboard(); setTimeout(dashboardLoop, 1000); }
+    async function historyLoop() { if (currentPage === "home") await loadWealthChart(); setTimeout(historyLoop, 5000); }
 
-        function calculateTotal() {
-            const id = document.getElementById('assetSelect').value;
-            const qty = parseFloat(document.getElementById('quantity').value) || 0;
-            const asset = pricesData.find(p => p.asset_id == id);
-            if (asset) {
-                document.getElementById('estimated-total').innerText = `₹${(asset.price * qty).toFixed(2)}`;
-            }
-        }
-
-        function selectAsset(id, symbol) {
-            selectedAssetId = id;
-            selectedAssetSymbol = symbol;
-            document.getElementById('selected-asset-title').innerText = `${symbol} Market Performance`;
-            updateAssetChart();
-        }
-
-        const tradeForm = document.getElementById('tradeForm');
-        if (tradeForm) {
-            tradeForm.onsubmit = async (e) => {
-                e.preventDefault();
-                const assetId = document.getElementById('assetSelect').value;
-                const type = document.querySelector('input[name="orderType"]:checked').value;
-                const qty = parseFloat(document.getElementById('quantity').value);
-
-                // Pre-validation
-                const asset = pricesData.find(p => p.asset_id == assetId);
-                
-                // Fetch latest data for validation
-                const [wRes, pRes] = await Promise.all([fetch('/api/wallet'), fetch('/api/portfolio')]);
-                const wallet = await wRes.json();
-                const portfolio = await pRes.json();
-                
-                if (type === 'buy' && (asset.price * qty) > wallet.balance) {
-                    alert('Insufficient cash balance!'); return;
-                }
-                if (type === 'sell') {
-                    const holding = portfolio.find(i => i.asset_id == assetId);
-                    if (!holding || holding.quantity < qty) {
-                        alert('Insufficient asset quantity!'); return;
-                    }
-                }
-
-                const res = await fetch('/api/order', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ asset_id: assetId, order_type: type, quantity: qty })
-                });
-
-                if (res.ok) {
-                    alert('Trade Executed Successfully!');
-                    await refreshDashboard();
-                } else {
-                    const err = await res.json();
-                    alert(err.error);
-                }
-            };
-        }
-
-        // High-frequency auto-refresh (1 second)
-        const currentPage = "{{ page }}";
-        dashboardLoop();
-        historyLoop();
-    </script>
-</body>
-</html>
+    dashboardLoop();
+    historyLoop();
+</script>
+{% endblock %}

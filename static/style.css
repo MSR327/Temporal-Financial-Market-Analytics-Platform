@@ -192,11 +192,51 @@ body {
     font-size: 1.1rem;
 }
 
-/* Table Styles */
-table {
-    width: 100%;
-    border-collapse: collapse;
+/* Search Input */
+.search-container {
+    padding: 0.75rem 1.5rem;
+    border-bottom: 1px solid var(--border);
 }
+
+.search-input {
+    width: 100%;
+    background: #24272d;
+    border: 1px solid var(--border);
+    color: white;
+    padding: 0.6rem 1rem;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.search-input:focus {
+    border-color: var(--accent);
+}
+
+/* Wealth Summary Section (Groww Style) */
+.wealth-summary {
+    display: flex;
+    gap: 3rem;
+    margin-bottom: 2rem;
+    padding: 0.5rem 0;
+}
+
+.wealth-item h4 {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin: 0 0 0.4rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.wealth-item .value {
+    font-size: 1.4rem;
+    font-weight: 700;
+}
+
+.wealth-item .value.pos { color: var(--success); }
+.wealth-item .value.neg { color: var(--danger); }
 
 th {
     text-align: left;

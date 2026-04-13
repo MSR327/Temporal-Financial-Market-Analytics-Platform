@@ -3,6 +3,16 @@
 -- ========================= 
 CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
+-- Drop dependent objects first
+DROP VIEW IF EXISTS portfolio_summary CASCADE;
+DROP VIEW IF EXISTS latest_prices CASCADE;
+DROP VIEW IF EXISTS portfolio_value CASCADE;
+DROP VIEW IF EXISTS profit_loss CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS market_data_daily CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS mv_top_assets CASCADE;
+
+-- Drop tables
+DROP TABLE IF EXISTS audit_logs CASCADE;
 DROP TABLE IF EXISTS market_data CASCADE;
 DROP TABLE IF EXISTS portfolio_history CASCADE;
 DROP TABLE IF EXISTS trades CASCADE;
@@ -11,12 +21,7 @@ DROP TABLE IF EXISTS portfolio CASCADE;
 DROP TABLE IF EXISTS wallets CASCADE;
 DROP TABLE IF EXISTS assets CASCADE;
 DROP TABLE IF EXISTS users CASCADE;
-DROP VIEW IF EXISTS latest_prices CASCADE;
 DROP TABLE IF EXISTS latest_prices_cache CASCADE;
-DROP MATERIALIZED VIEW IF EXISTS market_data_daily CASCADE;
-DROP VIEW IF EXISTS portfolio_value CASCADE;
-DROP VIEW IF EXISTS profit_loss CASCADE;
-DROP MATERIALIZED VIEW IF EXISTS mv_top_assets CASCADE;
 
 -- ========================= 
 -- 1. USERS 
@@ -58,7 +63,34 @@ FOR EACH ROW
 EXECUTE FUNCTION fn_create_wallet(); 
 
 -- ========================= 
--- 3. ASSETS 
+-- 3. AUDIT LOGGING (DBMS MASTER FEATURE)
+-- ========================= 
+CREATE TABLE audit_logs (
+    log_id SERIAL PRIMARY KEY,
+    user_id INT REFERENCES users(user_id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    old_value NUMERIC(15,2),
+    new_value NUMERIC(15,2),
+    timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE OR REPLACE FUNCTION fn_audit_wallet_changes() 
+RETURNS TRIGGER AS $$
+BEGIN
+    IF (OLD.balance IS DISTINCT FROM NEW.balance) THEN
+        INSERT INTO audit_logs(user_id, action, old_value, new_value)
+        VALUES (NEW.user_id, 'WALLET_BALANCE_UPDATE', OLD.balance, NEW.balance);
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_audit_wallet_changes
+AFTER UPDATE ON wallets
+FOR EACH ROW EXECUTE FUNCTION fn_audit_wallet_changes();
+
+-- ========================= 
+-- 4. ASSETS 
 -- ========================= 
 CREATE TABLE assets ( 
     asset_id SERIAL PRIMARY KEY, 
@@ -95,7 +127,7 @@ INSERT INTO assets (name, symbol, type) VALUES
 ('Salesforce Inc.', 'CRM', 'stock');
 
 -- ========================= 
--- 4. MARKET DATA & LATEST PRICES CACHE
+-- 5. MARKET DATA & LATEST PRICES CACHE
 -- ========================= 
 CREATE TABLE market_data ( 
     asset_id INT REFERENCES assets(asset_id) ON DELETE CASCADE, 
@@ -107,7 +139,6 @@ CREATE TABLE market_data (
 SELECT create_hypertable('market_data', 'time'); 
 
 -- Continuous Aggregate for Daily OHLC (Candlesticks)
--- Note: Created WITH NO DATA to avoid transaction errors
 CREATE MATERIALIZED VIEW market_data_daily
 WITH (timescaledb.continuous) AS
 SELECT
@@ -167,7 +198,7 @@ ORDER BY asset_id, time DESC
 ON CONFLICT (asset_id) DO NOTHING;
 
 -- ========================= 
--- 5. ORDERS & TRADES 
+-- 6. ORDERS & TRADES 
 -- ========================= 
 CREATE TABLE orders ( 
     order_id SERIAL, 
@@ -185,7 +216,7 @@ SELECT create_hypertable('orders', 'created_at');
 
 CREATE TABLE trades( 
     trade_id SERIAL, 
-    order_id INT, -- FK removed for now because orders PK changed
+    order_id INT, 
     user_id INT REFERENCES users(user_id), 
     asset_id INT REFERENCES assets(asset_id), 
     trade_type TEXT CHECK (trade_type IN ('buy','sell')), 
@@ -198,7 +229,7 @@ CREATE TABLE trades(
 SELECT create_hypertable('trades', 'executed_at');
 
 -- ========================= 
--- 6. PORTFOLIO 
+-- 7. PORTFOLIO 
 -- ========================= 
 CREATE TABLE portfolio ( 
     user_id INT REFERENCES users(user_id) ON DELETE CASCADE, 
@@ -209,7 +240,7 @@ CREATE TABLE portfolio (
 ); 
 
 -- ========================= 
--- 7. TRIGGERS FOR TRADES
+-- 8. TRIGGERS FOR TRADES
 -- ========================= 
 
 -- Trigger: Update wallet after trade
@@ -255,7 +286,7 @@ AFTER INSERT ON trades
 FOR EACH ROW EXECUTE FUNCTION fn_update_portfolio_after_trade();
 
 -- ========================= 
--- 8. CORE FUNCTIONS
+-- 9. CORE FUNCTIONS
 -- ========================= 
 
 CREATE OR REPLACE FUNCTION execute_trade(p_order_id INT) 
@@ -309,7 +340,7 @@ END;
 $$ LANGUAGE plpgsql; 
 
 -- ========================= 
--- 9. PORTFOLIO HISTORY (PARTITIONED)
+-- 10. PORTFOLIO HISTORY (PARTITIONED)
 -- ========================= 
 CREATE TABLE portfolio_history ( 
     time TIMESTAMPTZ NOT NULL, 
@@ -332,7 +363,11 @@ BEGIN
 END; 
 $$ LANGUAGE plpgsql; 
 
--- View: Portfolio Summary (Uses LEFT JOIN to show assets even if price data is missing)
+-- ========================= 
+-- 11. VIEWS
+-- ========================= 
+
+-- View: Portfolio Summary
 CREATE VIEW portfolio_summary AS 
 SELECT 
     p.user_id, p.asset_id, a.symbol, p.quantity, p.avg_price, 
