@@ -271,6 +271,31 @@ td {
     color: var(--text-secondary);
 }
 
+.trade-type {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+}
+
+.trade-type label {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.7rem 0.85rem;
+    background: #24272e;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--text-primary);
+}
+
+.trade-type input[type="radio"] {
+    width: auto;
+    margin: 0;
+}
+
 select, input {
     width: 100%;
     padding: 1rem;
@@ -394,4 +419,68 @@ select:focus, input:focus {
     display: grid;
     grid-template-columns: 350px 1fr;
     gap: 2rem;
+}
+
+.exchange-grid {
+    display: grid;
+    grid-template-columns: 300px 1fr 300px;
+    gap: 1rem;
+    align-items: stretch;
+}
+
+.exchange-side-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.market-center-panel {
+    display: flex;
+    flex-direction: column;
+}
+
+.market-bottom-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.micro-panel {
+    background: #171a20;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.75rem;
+}
+
+.micro-panel h4 {
+    margin: 0 0 0.75rem;
+    font-size: 0.9rem;
+}
+
+.micro-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+}
+
+.micro-table th,
+.micro-table td {
+    padding: 0.45rem;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+@media (max-width: 1400px) {
+    .exchange-grid {
+        grid-template-columns: 280px 1fr;
+    }
+    .market-center-panel {
+        grid-column: 2 / 3;
+    }
+    .exchange-side-panel {
+        grid-column: 1 / -1;
+    }
+    .market-bottom-grid {
+        grid-template-columns: 1fr;
+    }
 }

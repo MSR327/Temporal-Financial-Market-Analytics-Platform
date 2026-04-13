@@ -231,10 +231,10 @@ def get_transactions():
 @app.route("/api/prices", methods=["GET"])
 def get_latest_prices():
     prices = database.execute_query(
-        "SELECT a.symbol, lp.price, lp.time, a.asset_id FROM latest_prices lp JOIN assets a ON lp.asset_id = a.asset_id",
+        "SELECT a.symbol, a.name, lp.price, lp.time, a.asset_id FROM latest_prices lp JOIN assets a ON lp.asset_id = a.asset_id",
         fetch=True
     )
-    return jsonify([{"symbol": r[0], "price": float(r[1]), "time": r[2], "asset_id": r[3]} for r in prices])
+    return jsonify([{"symbol": r[0], "name": r[1], "price": float(r[2]), "time": r[3], "asset_id": r[4]} for r in prices])
 
 @app.route("/api/analytics/ohlc/<int:asset_id>", methods=["GET"])
 def get_ohlc_history(asset_id):
@@ -292,15 +292,55 @@ def get_wealth_history():
     days_map = {'1M': 30, '3M': 90, '6M': 180, '1Y': 365}
     days = days_map.get(timeframe, 30)
 
-    # Fetch daily snapshots of portfolio value
+    # Fetch daily snapshots of portfolio value and cumulative invested amount.
     history = database.execute_query(
         """
-        SELECT time_bucket('1 day', time) as bucket, AVG(total_value) as total_value
-        FROM portfolio_history
-        WHERE user_id = %s AND time >= NOW() - INTERVAL '%s day'
-        GROUP BY bucket ORDER BY bucket ASC
+        WITH day_series AS (
+            SELECT generate_series(
+                date_trunc('day', NOW() - INTERVAL '%s day'),
+                date_trunc('day', NOW()),
+                INTERVAL '1 day'
+            ) AS day
+        ),
+        portfolio_daily AS (
+            SELECT
+                date_trunc('day', time) AS day,
+                AVG(total_value) AS total_value
+            FROM portfolio_history
+            WHERE user_id = %s AND time >= NOW() - INTERVAL '%s day'
+            GROUP BY 1
+        ),
+        trade_daily AS (
+            SELECT
+                date_trunc('day', executed_at) AS day,
+                SUM(
+                    CASE
+                        WHEN trade_type = 'buy' THEN quantity * price
+                        WHEN trade_type = 'sell' THEN -(quantity * price)
+                        ELSE 0
+                    END
+                ) AS net_investment
+            FROM trades
+            WHERE user_id = %s AND executed_at >= NOW() - INTERVAL '%s day'
+            GROUP BY 1
+        ),
+        invested_daily AS (
+            SELECT
+                ds.day,
+                SUM(COALESCE(td.net_investment, 0)) OVER (ORDER BY ds.day) AS invested_value
+            FROM day_series ds
+            LEFT JOIN trade_daily td ON ds.day = td.day
+        )
+        SELECT
+            ds.day AS bucket,
+            COALESCE(pd.total_value, 0) AS total_value,
+            COALESCE(id.invested_value, 0) AS invested_value
+        FROM day_series ds
+        LEFT JOIN portfolio_daily pd ON ds.day = pd.day
+        LEFT JOIN invested_daily id ON ds.day = id.day
+        ORDER BY ds.day ASC
         """,
-        (session['user_id'], days),
+        (days, session['user_id'], days, session['user_id'], days),
         fetch=True
     )
     
@@ -318,9 +358,17 @@ def get_wealth_history():
         )
         holdings_val = float(holdings[0][0]) if holdings and holdings[0][0] else 0
         
-        return jsonify([{"time": datetime.now().isoformat(), "total_value": balance + holdings_val}])
+        return jsonify([{
+            "time": datetime.now().isoformat(),
+            "total_value": balance + holdings_val,
+            "invested_value": holdings_val
+        }])
 
-    return jsonify([{"time": r[0].isoformat(), "total_value": float(r[1])} for r in history])
+    return jsonify([{
+        "time": r[0].isoformat(),
+        "total_value": float(r[1]),
+        "invested_value": float(r[2])
+    } for r in history])
 
 @app.route("/api/analytics/price_history/<int:asset_id>", methods=["GET"])
 def get_price_history(asset_id):
@@ -352,6 +400,66 @@ def get_price_history(asset_id):
         )
     
     return jsonify([{"time": r[0].isoformat(), "price": float(r[1])} for r in history])
+
+@app.route("/api/analytics/recent_trades/<int:asset_id>", methods=["GET"])
+def get_recent_market_trades(asset_id):
+    """Recent executed trades for the selected asset."""
+    rows = database.execute_query(
+        """
+        SELECT executed_at, price, quantity, trade_type
+        FROM trades
+        WHERE asset_id = %s
+        ORDER BY executed_at DESC
+        LIMIT 30
+        """,
+        (asset_id,),
+        fetch=True
+    )
+    return jsonify([
+        {
+            "time": r[0].isoformat(),
+            "price": float(r[1]),
+            "quantity": float(r[2]),
+            "side": r[3]
+        } for r in rows
+    ])
+
+@app.route("/api/analytics/orderbook/<int:asset_id>", methods=["GET"])
+def get_market_orderbook(asset_id):
+    """Price-level depth derived from recent executed trades."""
+    bids = database.execute_query(
+        """
+        SELECT ROUND(price::numeric, 2) AS price_level, SUM(quantity) AS total_qty
+        FROM trades
+        WHERE asset_id = %s
+          AND trade_type = 'buy'
+          AND executed_at >= NOW() - INTERVAL '24 hours'
+        GROUP BY 1
+        ORDER BY price_level DESC
+        LIMIT 10
+        """,
+        (asset_id,),
+        fetch=True
+    )
+    asks = database.execute_query(
+        """
+        SELECT ROUND(price::numeric, 2) AS price_level, SUM(quantity) AS total_qty
+        FROM trades
+        WHERE asset_id = %s
+          AND trade_type = 'sell'
+          AND executed_at >= NOW() - INTERVAL '24 hours'
+        GROUP BY 1
+        ORDER BY price_level ASC
+        LIMIT 10
+        """,
+        (asset_id,),
+        fetch=True
+    )
+
+    return jsonify({
+        "bids": [{"price": float(r[0]), "quantity": float(r[1])} for r in bids],
+        "asks": [{"price": float(r[0]), "quantity": float(r[1])} for r in asks]
+    })
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
