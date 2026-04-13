@@ -4,10 +4,12 @@ import bcrypt
 import database
 from datetime import datetime, timezone, timedelta
 import os
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__, template_folder='../templates', static_folder='../static')
 app.secret_key = os.urandom(24)
 CORS(app)
+scheduler = BackgroundScheduler()
 
 # --- Routes for HTML Pages ---
 
@@ -114,6 +116,74 @@ def get_wallet():
         fetch=True
     )
     return jsonify({"balance": float(wallet[0][0])})
+
+@app.route("/api/wallet/deposit", methods=["POST"])
+def deposit_wallet():
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.json or {}
+    amount = data.get("amount")
+    if amount is None:
+        return jsonify({"error": "Amount is required"}), 400
+
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid amount"}), 400
+
+    try:
+        database.execute_query(
+            "SELECT deposit_money(%s, %s)",
+            (user_id, amount),
+            fetch=True
+        )
+        wallet = database.execute_query(
+            "SELECT balance FROM wallets WHERE user_id = %s",
+            (user_id,),
+            fetch=True
+        )
+        return jsonify({
+            "balance": float(wallet[0][0]),
+            "message": "Deposit successful"
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e).split('\n')[0]}), 400
+
+@app.route("/api/wallet/withdraw", methods=["POST"])
+def withdraw_wallet():
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.json or {}
+    amount = data.get("amount")
+    if amount is None:
+        return jsonify({"error": "Amount is required"}), 400
+
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid amount"}), 400
+
+    try:
+        database.execute_query(
+            "SELECT withdraw_money(%s, %s)",
+            (user_id, amount),
+            fetch=True
+        )
+        wallet = database.execute_query(
+            "SELECT balance FROM wallets WHERE user_id = %s",
+            (user_id,),
+            fetch=True
+        )
+        return jsonify({
+            "balance": float(wallet[0][0]),
+            "message": "Withdrawal successful"
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e).split('\n')[0]}), 400
 
 @app.route("/api/portfolio", methods=["GET"])
 def get_portfolio():
@@ -461,5 +531,172 @@ def get_market_orderbook(asset_id):
         "asks": [{"price": float(r[0]), "quantity": float(r[1])} for r in asks]
     })
 
+@app.route("/api/analytics/sma/<int:asset_id>", methods=["GET"])
+def get_sma(asset_id):
+    period = request.args.get("period", "7")
+    try:
+        n = max(2, min(int(period), 120))
+    except ValueError:
+        return jsonify({"error": "Invalid period"}), 400
+
+    rows = database.execute_query(
+        """
+        SELECT
+            time,
+            price,
+            AVG(price) OVER (
+                PARTITION BY asset_id
+                ORDER BY time
+                ROWS BETWEEN %s PRECEDING AND CURRENT ROW
+            ) AS sma_n
+        FROM market_data
+        WHERE asset_id = %s
+          AND time >= NOW() - INTERVAL '90 days'
+        ORDER BY time ASC
+        """,
+        (n - 1, asset_id),
+        fetch=True
+    )
+    return jsonify([
+        {"time": r[0].isoformat(), "price": float(r[1]), "sma": float(r[2]) if r[2] is not None else None}
+        for r in rows
+    ])
+
+@app.route("/api/analytics/volatility/<int:asset_id>", methods=["GET"])
+def get_volatility(asset_id):
+    rows = database.execute_query(
+        """
+        WITH daily AS (
+            SELECT
+                time_bucket('1 day', time) AS bucket,
+                AVG(price) AS avg_price
+            FROM market_data
+            WHERE asset_id = %s
+              AND time >= NOW() - INTERVAL '90 days'
+            GROUP BY 1
+        )
+        SELECT
+            bucket,
+            STDDEV_SAMP(avg_price) OVER (
+                ORDER BY bucket
+                ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+            ) AS rolling_volatility
+        FROM daily
+        ORDER BY bucket ASC
+        """,
+        (asset_id,),
+        fetch=True
+    )
+    return jsonify([
+        {"time": r[0].isoformat(), "volatility": float(r[1]) if r[1] is not None else 0.0}
+        for r in rows
+    ])
+
+@app.route("/api/analytics/leaderboard", methods=["GET"])
+def get_leaderboard():
+    rows = database.execute_query(
+        """
+        SELECT
+            u.username,
+            COALESCE(SUM(ps.unrealized_pl), 0) AS total_pl,
+            COALESCE(SUM(ps.current_value), 0) AS total_value
+        FROM users u
+        LEFT JOIN portfolio_summary ps ON u.user_id = ps.user_id
+        GROUP BY u.user_id, u.username
+        ORDER BY total_pl DESC
+        LIMIT 10
+        """,
+        fetch=True
+    )
+    return jsonify([
+        {
+            "rank": idx + 1,
+            "username": r[0],
+            "total_pl": float(r[1]),
+            "total_value": float(r[2])
+        } for idx, r in enumerate(rows)
+    ])
+
+@app.route("/api/analytics/kpis", methods=["GET"])
+def get_user_kpis():
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    # Prefer concurrent refresh; fallback to non-concurrent for safety.
+    try:
+        database.execute_query("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_user_daily_kpis")
+    except Exception:
+        try:
+            database.execute_query("REFRESH MATERIALIZED VIEW mv_user_daily_kpis")
+        except Exception as e:
+            return jsonify({"error": f"KPI refresh failed: {str(e)}"}), 500
+
+    rows = database.execute_query(
+        """
+        SELECT day, user_id, total_trades, buy_turnover, sell_turnover
+        FROM mv_user_daily_kpis
+        WHERE user_id = %s
+          AND day >= NOW() - INTERVAL '30 days'
+        ORDER BY day DESC
+        """,
+        (user_id,),
+        fetch=True
+    )
+    return jsonify([
+        {
+            "day": r[0].isoformat(),
+            "user_id": int(r[1]),
+            "total_trades": int(r[2]),
+            "buy_turnover": float(r[3]) if r[3] is not None else 0.0,
+            "sell_turnover": float(r[4]) if r[4] is not None else 0.0
+        } for r in rows
+    ])
+
+@app.route("/api/analytics/top_assets", methods=["GET"])
+def get_top_assets():
+    rows = database.execute_query(
+        """
+        SELECT a.symbol, a.name, m.total_traded_value
+        FROM mv_top_assets m
+        JOIN assets a ON a.asset_id = m.asset_id
+        ORDER BY m.total_traded_value DESC
+        LIMIT 5
+        """,
+        fetch=True
+    )
+    return jsonify([
+        {
+            "symbol": r[0],
+            "name": r[1],
+            "total_traded_value": float(r[2]) if r[2] is not None else 0.0
+        } for r in rows
+    ])
+
+def refresh_top_assets_job():
+    try:
+        database.execute_query("REFRESH MATERIALIZED VIEW mv_top_assets")
+        print("[scheduler] refreshed mv_top_assets")
+    except Exception as e:
+        print(f"[scheduler] mv_top_assets refresh failed: {e}")
+
+def refresh_user_kpis_job():
+    try:
+        database.execute_query("REFRESH MATERIALIZED VIEW mv_user_daily_kpis")
+        print("[scheduler] refreshed mv_user_daily_kpis")
+    except Exception as e:
+        print(f"[scheduler] mv_user_daily_kpis refresh failed: {e}")
+
+def start_scheduler():
+    if scheduler.running:
+        return
+    scheduler.add_job(refresh_top_assets_job, "interval", minutes=10, id="refresh_top_assets", replace_existing=True)
+    scheduler.add_job(refresh_user_kpis_job, "interval", hours=1, id="refresh_user_kpis", replace_existing=True)
+    scheduler.start()
+    print("[scheduler] started")
+
 if __name__ == "__main__":
+    # Avoid duplicate schedulers with Flask reloader.
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+        start_scheduler()
     app.run(debug=True, port=5000)

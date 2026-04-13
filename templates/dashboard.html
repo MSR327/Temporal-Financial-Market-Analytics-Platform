@@ -47,6 +47,11 @@
                     <div class="value" id="home-cash">$0.00</div>
                 </div>
             </div>
+            <div class="wallet-actions">
+                <input type="number" id="wallet-amount" min="0.01" step="0.01" placeholder="Enter amount" />
+                <button class="trade-btn" type="button" onclick="handleWalletAction('deposit')">Deposit</button>
+                <button class="trade-btn wallet-withdraw-btn" type="button" onclick="handleWalletAction('withdraw')">Withdraw</button>
+            </div>
         </div>
         {% endif %}
 
@@ -257,6 +262,31 @@
         const returnsElem = document.getElementById('home-returns');
         returnsElem.innerText = `${fmtUsd(returns)} (${returnsPct.toFixed(2)}%)`;
         returnsElem.className = `value ${returns >= 0 ? 'pos' : 'neg'}`;
+    }
+
+    async function handleWalletAction(action) {
+        const input = document.getElementById('wallet-amount');
+        if (!input) return;
+        const amount = parseFloat(input.value);
+        if (!amount || amount <= 0) {
+            alert('Please enter a valid amount.');
+            return;
+        }
+
+        const endpoint = action === 'deposit' ? '/api/wallet/deposit' : '/api/wallet/withdraw';
+        const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            input.value = '';
+            alert(data.message || 'Wallet updated');
+            refreshDashboard();
+        } else {
+            alert(data.error || 'Wallet update failed');
+        }
     }
 
     async function loadTransactions() {

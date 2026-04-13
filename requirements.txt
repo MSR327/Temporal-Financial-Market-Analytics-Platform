@@ -9,3 +9,4 @@ yfinance
 cryptography
 python-dotenv
 bcrypt
+apscheduler

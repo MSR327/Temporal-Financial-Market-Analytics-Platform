@@ -238,6 +238,18 @@ body {
 .wealth-item .value.pos { color: var(--success); }
 .wealth-item .value.neg { color: var(--danger); }
 
+.wallet-actions {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr 1fr;
+    gap: 0.75rem;
+    margin-top: 1rem;
+}
+
+.wallet-withdraw-btn {
+    background: #eb5757;
+    color: #fff;
+}
+
 th {
     text-align: left;
     padding: 1rem;
