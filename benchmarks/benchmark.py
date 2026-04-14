@@ -105,36 +105,7 @@ def main():
             ("OHLC aggregation", "manual time_bucket on market_data", f"{manual_ms:.2f}", "1.00x")
         )
 
-        # 1c) Portfolio history range query (hypertable vs regular temp table)
-        cur.execute("DROP TABLE IF EXISTS portfolio_history_temp")
-        cur.execute(
-            """
-            CREATE TEMP TABLE portfolio_history_temp AS
-            SELECT * FROM portfolio_history
-            """
-        )
-        q_hyper = """
-            SELECT user_id, time, total_value
-            FROM portfolio_history
-            WHERE time >= NOW() - INTERVAL '30 days'
-            ORDER BY time DESC
-        """
-        q_temp = """
-            SELECT user_id, time, total_value
-            FROM portfolio_history_temp
-            WHERE time >= NOW() - INTERVAL '30 days'
-            ORDER BY time DESC
-        """
-        hyper_ms = timed_runs(cur, q_hyper)
-        temp_ms = timed_runs(cur, q_temp)
-        benchmark_rows.append(
-            ("Portfolio history range query", "portfolio_history hypertable", f"{hyper_ms:.2f}", speedup(temp_ms, hyper_ms))
-        )
-        benchmark_rows.append(
-            ("Portfolio history range query", "portfolio_history_temp regular table", f"{temp_ms:.2f}", "1.00x")
-        )
-
-        # 1d) SMA-7 window function on last 1000 rows for one asset
+        # 1c) SMA-7 window function on last 1000 rows for one asset
         q_sma = """
             WITH latest_asset AS (
                 SELECT asset_id

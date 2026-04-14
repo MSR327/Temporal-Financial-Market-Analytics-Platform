@@ -48,7 +48,7 @@ ORDER BY total_pl DESC
 LIMIT 10;
 
 -- 5. Most Traded Assets (By Trade Count)
-SELECT 
+SELECT
     a.symbol,
     COUNT(t.trade_id) AS trade_count,
     SUM(t.quantity * t.price) AS volume
@@ -57,11 +57,13 @@ JOIN assets a ON t.asset_id = a.asset_id
 GROUP BY a.symbol
 ORDER BY trade_count DESC;
 
--- 6. Portfolio Value Over Time (Daily/Hourly Aggregation using TimescaleDB time_bucket)
-SELECT 
+-- 6. User Trading Activity (Daily Aggregation using TimescaleDB time_bucket)
+SELECT
     user_id,
-    time_bucket('1 hour', time) AS hour,
-    AVG(total_value) AS avg_value
-FROM portfolio_history
-GROUP BY user_id, hour
-ORDER BY hour;
+    time_bucket('1 day', executed_at) AS day,
+    COUNT(*) AS total_trades,
+    SUM(CASE WHEN trade_type = 'buy' THEN quantity * price ELSE 0 END) AS buy_volume,
+    SUM(CASE WHEN trade_type = 'sell' THEN quantity * price ELSE 0 END) AS sell_volume
+FROM trades
+GROUP BY user_id, day
+ORDER BY day DESC;

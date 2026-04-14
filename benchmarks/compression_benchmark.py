@@ -1,24 +1,14 @@
 import os
+import sys
 import random
 import time
 from datetime import datetime, timedelta, timezone
-
-import psycopg2
 from dotenv import load_dotenv
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from backend.database import get_db_connection, release_db_connection
 
 load_dotenv()
-
-
-def get_conn():
-    return psycopg2.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        dbname=os.getenv("DB_NAME", "temporal"),
-        user=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASS", ""),
-        port=os.getenv("DB_PORT", "5434"),
-    )
-
 
 def measure_query_ms(cur, query, params=None, runs=5):
     samples = []
@@ -31,7 +21,7 @@ def measure_query_ms(cur, query, params=None, runs=5):
 
 
 def main():
-    conn = get_conn()
+    conn = get_db_connection()
     conn.autocommit = True
     with conn.cursor() as cur:
         cur.execute("SELECT asset_id FROM assets ORDER BY asset_id LIMIT 5")
@@ -93,7 +83,7 @@ def main():
         print("-" * 60)
 
     conn.close()
-
+    release_db_connection(conn)
 
 if __name__ == "__main__":
     main()
