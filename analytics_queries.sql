@@ -11,13 +11,25 @@ SELECT
 FROM market_data;
 
 -- 2. Price Change using LAG
-SELECT 
+WITH price_with_lag AS (
+    SELECT
+        asset_id,
+        time,
+        price,
+        LAG(price) OVER (PARTITION BY asset_id ORDER BY time) AS prev_price
+    FROM market_data
+)
+SELECT
     asset_id,
     time,
     price,
-    LAG(price) OVER (PARTITION BY asset_id ORDER BY time) AS prev_price,
-    (price - LAG(price) OVER (PARTITION BY asset_id ORDER BY time)) / LAG(price) OVER (PARTITION BY asset_id ORDER BY time) * 100 AS pct_change
-FROM market_data;
+    prev_price,
+    CASE
+        WHEN prev_price IS NOT NULL AND prev_price <> 0
+        THEN (price - prev_price) / prev_price * 100
+        ELSE NULL
+    END AS pct_change
+FROM price_with_lag;
 
 -- 3. Volatility (Standard Deviation over time)
 SELECT 

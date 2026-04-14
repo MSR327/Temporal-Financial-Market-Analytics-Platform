@@ -13,11 +13,11 @@
 <body>
     <div class="sidebar">
         <div class="sidebar-header">
-            📈 TEMPORAL
+            GROWWWW
         </div>
         <nav class="sidebar-nav">
             <a href="{{ url_for('dashboard') }}" class="nav-item {{ 'active' if page == 'home' else '' }}">
-                <span class="icon">🏠</span> Overview
+                <span class="icon">💰</span> Overview
             </a>
             <a href="{{ url_for('markets') }}" class="nav-item {{ 'active' if page == 'markets' else '' }}">
                 <span class="icon">📊</span> Market Data
@@ -29,12 +29,12 @@
                 <span class="icon">🔄</span> Trade
             </a>
             <a href="{{ url_for('transactions_page') }}" class="nav-item {{ 'active' if page == 'transactions' else '' }}">
-                <span class="icon">📜</span> Transactions
+                <span class="icon">💳</span> Transactions
             </a>
         </nav>
         <div class="sidebar-footer">
             <a href="{{ url_for('logout') }}" class="nav-item">
-                <span class="icon">🚪</span> Logout
+                <span class="icon"></span> Logout
             </a>
         </div>
     </div>

@@ -1,36 +1,18 @@
 import os
+import sys
 import time
 import random
 import requests
 import yfinance as yf
 from datetime import datetime, timezone, timedelta
-import psycopg2
 from dotenv import load_dotenv
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from backend.database import get_db_connection, release_db_connection
 
 load_dotenv()
 
-# Database configuration
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_NAME = os.getenv("DB_NAME", "temporal")
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASS = os.getenv("DB_PASS", "051223")
-DB_PORT = os.getenv("DB_PORT", "5434")
-
-# Binance API configuration
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
-BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
-
-# Create a global session to reuse TCP connections (optimizes port usage)
 session = requests.Session()
-
-def get_db_connection():
-    return psycopg2.connect(
-        host=DB_HOST,
-        database=DB_NAME,
-        user=DB_USER,
-        password=DB_PASS,
-        port=DB_PORT
-    )
 
 def get_assets():
     conn = get_db_connection()
@@ -39,7 +21,7 @@ def get_assets():
             cur.execute("SELECT asset_id, symbol, type FROM assets")
             return cur.fetchall()
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 def insert_market_price(asset_id, price, source='simulated'):
     conn = get_db_connection()
@@ -53,7 +35,7 @@ def insert_market_price(asset_id, price, source='simulated'):
     except Exception as e:
         print(f"Error inserting price: {e}")
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 def insert_market_price_historical(asset_id, price, timestamp, source):
     """Helper to insert historical data with specific timestamps."""
@@ -72,18 +54,7 @@ def insert_market_price_historical(asset_id, price, timestamp, source):
     except Exception as e:
         pass # Ignore duplicates if re-running
     finally:
-        conn.close()
-
-def record_portfolio_history():
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT record_portfolio_history()")
-            conn.commit()
-    except Exception as e:
-        print(f"Error recording portfolio history: {e}")
-    finally:
-        conn.close()
+        release_db_connection(conn)
 
 def has_historical_data(asset_id, days=365):
     """Check if the database already has enough historical data for this asset."""
@@ -107,7 +78,7 @@ def has_historical_data(asset_id, days=365):
             time_diff = now - oldest_record
             return time_diff.days >= (days * 0.95)
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 def refresh_aggregates():
     """Manually refresh continuous aggregates to show historical data immediately."""
@@ -121,7 +92,7 @@ def refresh_aggregates():
     except Exception as e:
         print(f"⚠️ Could not refresh aggregates: {e}")
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 def backfill_historical_data(assets):
     """Backfill 1 year of data: 30 days REAL from API + 335 days GENERATED."""
@@ -222,9 +193,7 @@ def fetch_market_prices(assets, interval=5):
                 
             except Exception as e:
                 print(f"❌ Error fetching {symbol}: {e}")
-        
-        # Sync portfolio values based on new prices
-        record_portfolio_history()
+
         time.sleep(interval)
 
 if __name__ == "__main__":

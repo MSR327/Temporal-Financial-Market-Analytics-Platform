@@ -6,19 +6,13 @@ CREATE EXTENSION IF NOT EXISTS citext;
 
 -- Drop dependent objects first
 DROP VIEW IF EXISTS portfolio_summary CASCADE;
-DROP VIEW IF EXISTS cumulative_pnl CASCADE;
 DROP VIEW IF EXISTS latest_prices CASCADE;
-DROP VIEW IF EXISTS portfolio_value CASCADE;
-DROP VIEW IF EXISTS profit_loss CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS market_data_daily CASCADE;
-DROP MATERIALIZED VIEW IF EXISTS mv_top_assets CASCADE;
-DROP MATERIALIZED VIEW IF EXISTS mv_user_daily_kpis CASCADE;
 
 -- Drop tables
 DROP TABLE IF EXISTS audit_logs CASCADE;
 DROP TABLE IF EXISTS market_data CASCADE;
 DROP TABLE IF EXISTS realized_pnl CASCADE;
-DROP TABLE IF EXISTS portfolio_history CASCADE;
 DROP TABLE IF EXISTS trades CASCADE;
 DROP TABLE IF EXISTS orders CASCADE;
 DROP TABLE IF EXISTS portfolio CASCADE;
@@ -26,7 +20,6 @@ DROP TABLE IF EXISTS wallets CASCADE;
 DROP TABLE IF EXISTS assets CASCADE;
 DROP TABLE IF EXISTS users CASCADE;
 DROP TABLE IF EXISTS latest_prices_cache CASCADE;
-DROP FUNCTION IF EXISTS get_portfolio_at(INT, TIMESTAMPTZ) CASCADE;
 DROP FUNCTION IF EXISTS process_limit_orders(INT) CASCADE;
 DROP FUNCTION IF EXISTS expire_stale_orders() CASCADE;
 
@@ -281,6 +274,7 @@ CREATE TABLE portfolio (
 
 CREATE INDEX idx_portfolio_user ON portfolio(user_id);
 CREATE INDEX idx_portfolio_current ON portfolio(user_id, asset_id) WHERE valid_to IS NULL AND transaction_to IS NULL;
+CREATE UNIQUE INDEX idx_portfolio_unique_current ON portfolio(user_id, asset_id) WHERE valid_to IS NULL AND transaction_to IS NULL;
 
 CREATE TABLE realized_pnl (
     time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -395,22 +389,36 @@ FOR EACH ROW EXECUTE FUNCTION fn_update_portfolio_after_trade();
 -- 9. CORE FUNCTIONS
 -- ========================= 
 
-CREATE OR REPLACE FUNCTION execute_trade(p_order_id INT) 
-RETURNS VOID AS $$ 
-DECLARE 
+CREATE OR REPLACE FUNCTION execute_trade(p_order_id INT)
+RETURNS VOID AS $$
+DECLARE
     v_user INT; v_asset INT; v_type TEXT; v_price NUMERIC; v_qty NUMERIC; v_kind TEXT;
     v_total_cost NUMERIC; v_balance NUMERIC; v_holdings NUMERIC;
-BEGIN 
+BEGIN
     SELECT user_id, asset_id, order_type, price, quantity, order_kind
     INTO v_user, v_asset, v_type, v_price, v_qty, v_kind
-    FROM orders WHERE order_id = p_order_id;
-    
+    FROM orders
+    WHERE order_id = p_order_id
+      AND created_at >= NOW() - INTERVAL '7 days'
+    LIMIT 1;
+
+    IF v_user IS NULL THEN
+        SELECT user_id, asset_id, order_type, price, quantity, order_kind
+        INTO v_user, v_asset, v_type, v_price, v_qty, v_kind
+        FROM orders
+        WHERE order_id = p_order_id
+        LIMIT 1;
+    END IF;
+
+    IF v_user IS NULL THEN
+        RAISE EXCEPTION 'Order % not found', p_order_id;
+    END IF;
+
     v_total_cost := v_price * v_qty;
-    
-    -- Verification
+
     IF v_type = 'buy' THEN
         SELECT balance INTO v_balance FROM wallets WHERE user_id = v_user FOR UPDATE;
-        IF v_balance < v_total_cost THEN 
+        IF v_balance < v_total_cost THEN
             UPDATE orders SET status = 'cancelled' WHERE order_id = p_order_id;
             RAISE EXCEPTION 'Insufficient balance';
         END IF;
@@ -428,12 +436,11 @@ BEGIN
         END IF;
     END IF;
 
-    -- Insert trade (Triggers will handle wallet and portfolio updates)
-    INSERT INTO trades(order_id, user_id, asset_id, price, quantity, trade_type) 
-    VALUES (p_order_id, v_user, v_asset, v_price, v_qty, v_type); 
+    INSERT INTO trades(order_id, user_id, asset_id, price, quantity, trade_type)
+    VALUES (p_order_id, v_user, v_asset, v_price, v_qty, v_type);
 
-    UPDATE orders SET status = 'filled' WHERE order_id = p_order_id; 
-END; 
+    UPDATE orders SET status = 'filled' WHERE order_id = p_order_id;
+END;
 $$ LANGUAGE plpgsql; 
 
 CREATE OR REPLACE FUNCTION place_order(p_user INT, p_asset INT, p_type TEXT, p_qty NUMERIC) 
@@ -490,7 +497,7 @@ BEGIN
         v_kind,
         p_target_price,
         p_expires_at,
-        CASE WHEN v_kind = 'market' THEN 'open' ELSE 'open' END
+        'open'
     )
     RETURNING order_id INTO v_order_id;
 
@@ -561,75 +568,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ========================= 
--- 10. PORTFOLIO HISTORY (PARTITIONED)
--- ========================= 
-CREATE TABLE portfolio_history ( 
-    time TIMESTAMPTZ NOT NULL, 
-    user_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE, 
-    invested_value NUMERIC(18,2) DEFAULT 0,
-    holdings_value NUMERIC(18,2) DEFAULT 0,
-    cash_value NUMERIC(18,2) DEFAULT 0,
-    total_value NUMERIC(18,2) 
-); 
-
-SELECT create_hypertable('portfolio_history', 'time'); 
-CREATE INDEX idx_portfolio_history_user_time ON portfolio_history(user_id, time DESC);
-
-CREATE OR REPLACE FUNCTION record_portfolio_history() 
-RETURNS VOID AS $$ 
-BEGIN 
-    INSERT INTO portfolio_history(time, user_id, invested_value, holdings_value, cash_value, total_value)
-    SELECT
-        NOW(),
-        u.user_id,
-        COALESCE(SUM(p.quantity * p.avg_price), 0) AS invested_value,
-        COALESCE(SUM(p.quantity * lp.price), 0) AS holdings_value,
-        COALESCE(w.balance, 0) AS cash_value,
-        COALESCE(w.balance, 0) + COALESCE(SUM(p.quantity * lp.price), 0) AS total_value
-    FROM users u
-    LEFT JOIN wallets w ON u.user_id = w.user_id
-    LEFT JOIN portfolio p ON u.user_id = p.user_id 
-        AND p.valid_to IS NULL
-        AND p.transaction_to IS NULL
-    LEFT JOIN latest_prices lp ON p.asset_id = lp.asset_id 
-    GROUP BY u.user_id, w.balance; 
-END; 
-$$ LANGUAGE plpgsql; 
-
-CREATE OR REPLACE FUNCTION get_portfolio_at(p_user_id INT, p_as_of TIMESTAMPTZ)
-RETURNS TABLE (
-    user_id INT,
-    asset_id INT,
-    quantity NUMERIC,
-    avg_price NUMERIC,
-    valid_from TIMESTAMPTZ,
-    valid_to TIMESTAMPTZ,
-    transaction_from TIMESTAMPTZ,
-    transaction_to TIMESTAMPTZ
-) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        p.user_id,
-        p.asset_id,
-        p.quantity,
-        p.avg_price,
-        p.valid_from,
-        p.valid_to,
-        p.transaction_from,
-        p.transaction_to
-    FROM portfolio p
-    WHERE p.user_id = p_user_id
-      AND p.valid_from <= p_as_of
-      AND (p.valid_to IS NULL OR p.valid_to > p_as_of)
-      AND p.transaction_from <= p_as_of
-      AND (p.transaction_to IS NULL OR p.transaction_to > p_as_of)
-    ORDER BY p.asset_id;
-END;
-$$ LANGUAGE plpgsql;
-
--- ========================= 
--- 11. VIEWS
+-- 10. VIEWS
 -- ========================= 
 
 -- View: Portfolio Summary
@@ -644,35 +583,6 @@ JOIN assets a ON p.asset_id = a.asset_id
 LEFT JOIN latest_prices lp ON p.asset_id = lp.asset_id
 WHERE p.valid_to IS NULL
   AND p.transaction_to IS NULL; 
-
-CREATE MATERIALIZED VIEW mv_top_assets AS 
-SELECT asset_id, SUM(quantity * price) AS total_traded_value 
-FROM trades GROUP BY asset_id ORDER BY total_traded_value DESC LIMIT 5
-WITH NO DATA; 
-
-CREATE MATERIALIZED VIEW mv_user_daily_kpis AS
-SELECT
-    time_bucket('1 day', executed_at) AS day,
-    user_id,
-    COUNT(*) AS total_trades,
-    SUM(CASE WHEN trade_type = 'buy' THEN quantity * price ELSE 0 END) AS buy_turnover,
-    SUM(CASE WHEN trade_type = 'sell' THEN quantity * price ELSE 0 END) AS sell_turnover
-FROM trades
-GROUP BY day, user_id
-WITH NO DATA;
-
-CREATE VIEW cumulative_pnl AS
-SELECT
-    rp.user_id,
-    rp.time,
-    rp.realized_profit,
-    SUM(rp.realized_profit) OVER (
-        PARTITION BY rp.user_id
-        ORDER BY rp.time
-        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS cumulative_realized_pnl
-FROM realized_pnl rp
-ORDER BY rp.user_id, rp.time;
 
 CREATE OR REPLACE FUNCTION deposit_money(p_user_id INT, p_amount NUMERIC) RETURNS VOID AS $$
 BEGIN

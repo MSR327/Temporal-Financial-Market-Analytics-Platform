@@ -160,6 +160,21 @@
                 <tbody><!-- Loaded via JS --></tbody>
             </table>
         </div>
+        <div class="content-section">
+            <h3>Wallet History</h3>
+            <table id="walletHistoryTable">
+                <thead>
+                    <tr>
+                        <th>Date & Time</th>
+                        <th>Type</th>
+                        <th>Amount</th>
+                        <th>Balance Before</th>
+                        <th>Balance After</th>
+                    </tr>
+                </thead>
+                <tbody><!-- Loaded via JS --></tbody>
+            </table>
+        </div>
         {% endif %}
 
         {% if page == 'trade' %}
@@ -400,10 +415,32 @@
             if (currentPage === "markets" && selectedAssetId) syncMarketTradePrice();
             if (currentPage === "home") loadHomeSnapshot();
             if (currentPage === "transactions") loadTransactions();
-            
+            if (currentPage === "portfolio") loadWalletHistory();
+
         } catch (err) {
             console.error("Refresh Error:", err);
         }
+    }
+
+    async function loadWalletHistory() {
+        const res = await fetch('/api/wallet/history');
+        const data = await res.json();
+        const tbody = document.querySelector('#walletHistoryTable tbody');
+        if (!tbody) return;
+
+        tbody.innerHTML = data.map(item => {
+            const change = item.change;
+            const type = change >= 0 ? 'Deposit' : 'Withdrawal';
+            return `
+                <tr>
+                    <td>${new Date(item.timestamp).toLocaleString()}</td>
+                    <td class="${change >= 0 ? 'pos' : 'neg'}">${type}</td>
+                    <td class="${change >= 0 ? 'pos' : 'neg'}">$${Math.abs(change).toFixed(2)}</td>
+                    <td>$${item.old_value.toFixed(2)}</td>
+                    <td>$${item.new_value.toFixed(2)}</td>
+                </tr>
+            `;
+        }).join('');
     }
 
     function rangeForPeriod(period) {
@@ -612,11 +649,15 @@
     }
 
     async function dashboardLoop() { await refreshDashboard(); setTimeout(dashboardLoop, 1000); }
-    async function historyLoop() { 
+    async function historyLoop() {
         if (currentPage === "markets" && selectedAssetId) {
-            await Promise.all([loadOrderBook(), loadRecentMarketTrades()]);
+            await Promise.all([
+                loadOrderBook(),
+                loadRecentMarketTrades(),
+                updateAssetChart()
+            ]);
         }
-        setTimeout(historyLoop, 2000); 
+        setTimeout(historyLoop, 15000);
     }
 
     dashboardLoop();

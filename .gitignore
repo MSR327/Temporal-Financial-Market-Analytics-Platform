@@ -25,11 +25,19 @@ MANIFEST
 
 # Environment
 .env
+.env.*
+*.env
 .venv
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
 
 # IDEs
 .vscode/

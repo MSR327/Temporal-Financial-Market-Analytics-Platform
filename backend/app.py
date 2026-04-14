@@ -8,7 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import yfinance as yf
 
 app = Flask(__name__, template_folder='../templates', static_folder='../static')
-app.secret_key = os.urandom(24)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-me-in-production")
 CORS(app)
 scheduler = BackgroundScheduler()
 
@@ -207,6 +207,32 @@ def get_portfolio():
         } for row in portfolio
     ])
 
+@app.route("/api/wallet/history", methods=["GET"])
+def get_wallet_history():
+    user_id = session.get('user_id')
+    if not user_id: return jsonify({"error": "Unauthorized"}), 401
+    history = database.execute_query(
+        """
+        SELECT action, old_value, new_value, timestamp, context
+        FROM audit_logs
+        WHERE user_id = %s
+        ORDER BY timestamp DESC
+        LIMIT 50
+        """,
+        (user_id,),
+        fetch=True
+    )
+    return jsonify([
+        {
+            "action": row[0],
+            "old_value": float(row[1]) if row[1] else 0,
+            "new_value": float(row[2]) if row[2] else 0,
+            "change": float(row[2]) - float(row[1]) if row[1] and row[2] else 0,
+            "timestamp": row[3].isoformat(),
+            "context": row[4]
+        } for row in history
+    ])
+
 @app.route("/api/order", methods=["POST"])
 def place_order():
     user_id = session.get('user_id')
@@ -383,94 +409,6 @@ def get_ohlc_history(asset_id):
         } for r in ohlc
     ])
 
-@app.route("/api/analytics/history", methods=["GET"])
-def get_wealth_history():
-    """Fetch total wealth history for the portfolio chart."""
-    if 'user_id' not in session:
-        return jsonify([])
-    
-    timeframe = request.args.get('period', '1M')
-    days_map = {'1M': 30, '3M': 90, '6M': 180, '1Y': 365}
-    days = days_map.get(timeframe, 30)
-
-    # Fetch daily snapshots of portfolio value and cumulative invested amount.
-    history = database.execute_query(
-        """
-        WITH day_series AS (
-            SELECT generate_series(
-                date_trunc('day', NOW() - INTERVAL '%s day'),
-                date_trunc('day', NOW()),
-                INTERVAL '1 day'
-            ) AS day
-        ),
-        portfolio_daily AS (
-            SELECT
-                date_trunc('day', time) AS day,
-                AVG(total_value) AS total_value
-            FROM portfolio_history
-            WHERE user_id = %s AND time >= NOW() - INTERVAL '%s day'
-            GROUP BY 1
-        ),
-        trade_daily AS (
-            SELECT
-                date_trunc('day', executed_at) AS day,
-                SUM(
-                    CASE
-                        WHEN trade_type = 'buy' THEN quantity * price
-                        WHEN trade_type = 'sell' THEN -(quantity * price)
-                        ELSE 0
-                    END
-                ) AS net_investment
-            FROM trades
-            WHERE user_id = %s AND executed_at >= NOW() - INTERVAL '%s day'
-            GROUP BY 1
-        ),
-        invested_daily AS (
-            SELECT
-                ds.day,
-                SUM(COALESCE(td.net_investment, 0)) OVER (ORDER BY ds.day) AS invested_value
-            FROM day_series ds
-            LEFT JOIN trade_daily td ON ds.day = td.day
-        )
-        SELECT
-            ds.day AS bucket,
-            COALESCE(pd.total_value, 0) AS total_value,
-            COALESCE(id.invested_value, 0) AS invested_value
-        FROM day_series ds
-        LEFT JOIN portfolio_daily pd ON ds.day = pd.day
-        LEFT JOIN invested_daily id ON ds.day = id.day
-        ORDER BY ds.day ASC
-        """,
-        (days, session['user_id'], days, session['user_id'], days),
-        fetch=True
-    )
-    
-    # Fallback: if no portfolio history exists (e.g. new user), 
-    # generate a single point with current value
-    if not history:
-        # Get current wallet balance
-        wallet = database.execute_query("SELECT balance FROM wallets WHERE user_id = %s", (session['user_id'],), fetch=True)
-        balance = float(wallet[0][0]) if wallet else 0
-        
-        # Get current holdings value
-        holdings = database.execute_query(
-            "SELECT SUM(quantity * price) FROM portfolio_summary WHERE user_id = %s", 
-            (session['user_id'],), fetch=True
-        )
-        holdings_val = float(holdings[0][0]) if holdings and holdings[0][0] else 0
-        
-        return jsonify([{
-            "time": datetime.now().isoformat(),
-            "total_value": balance + holdings_val,
-            "invested_value": holdings_val
-        }])
-
-    return jsonify([{
-        "time": r[0].isoformat(),
-        "total_value": float(r[1]),
-        "invested_value": float(r[2])
-    } for r in history])
-
 @app.route("/api/analytics/price_history/<int:asset_id>", methods=["GET"])
 def get_price_history(asset_id):
     """Fetch recent price points for the 1D chart (Last 24 hours or last 50 ticks)."""
@@ -640,172 +578,36 @@ def get_yfinance_candles(asset_id):
         "candles": candles
     })
 
-@app.route("/api/analytics/sma/<int:asset_id>", methods=["GET"])
-def get_sma(asset_id):
-    period = request.args.get("period", "7")
+def process_pending_limit_orders():
     try:
-        n = max(2, min(int(period), 120))
-    except ValueError:
-        return jsonify({"error": "Invalid period"}), 400
-
-    rows = database.execute_query(
-        """
-        SELECT
-            time,
-            price,
-            AVG(price) OVER (
-                PARTITION BY asset_id
-                ORDER BY time
-                ROWS BETWEEN %s PRECEDING AND CURRENT ROW
-            ) AS sma_n
-        FROM market_data
-        WHERE asset_id = %s
-          AND time >= NOW() - INTERVAL '90 days'
-        ORDER BY time ASC
-        """,
-        (n - 1, asset_id),
-        fetch=True
-    )
-    return jsonify([
-        {"time": r[0].isoformat(), "price": float(r[1]), "sma": float(r[2]) if r[2] is not None else None}
-        for r in rows
-    ])
-
-@app.route("/api/analytics/volatility/<int:asset_id>", methods=["GET"])
-def get_volatility(asset_id):
-    rows = database.execute_query(
-        """
-        WITH daily AS (
-            SELECT
-                time_bucket('1 day', time) AS bucket,
-                AVG(price) AS avg_price
-            FROM market_data
-            WHERE asset_id = %s
-              AND time >= NOW() - INTERVAL '90 days'
-            GROUP BY 1
-        )
-        SELECT
-            bucket,
-            STDDEV_SAMP(avg_price) OVER (
-                ORDER BY bucket
-                ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
-            ) AS rolling_volatility
-        FROM daily
-        ORDER BY bucket ASC
-        """,
-        (asset_id,),
-        fetch=True
-    )
-    return jsonify([
-        {"time": r[0].isoformat(), "volatility": float(r[1]) if r[1] is not None else 0.0}
-        for r in rows
-    ])
-
-@app.route("/api/analytics/leaderboard", methods=["GET"])
-def get_leaderboard():
-    rows = database.execute_query(
-        """
-        SELECT
-            u.username,
-            COALESCE(SUM(ps.unrealized_pl), 0) AS total_pl,
-            COALESCE(SUM(ps.current_value), 0) AS total_value
-        FROM users u
-        LEFT JOIN portfolio_summary ps ON u.user_id = ps.user_id
-        GROUP BY u.user_id, u.username
-        ORDER BY total_pl DESC
-        LIMIT 10
-        """,
-        fetch=True
-    )
-    return jsonify([
-        {
-            "rank": idx + 1,
-            "username": r[0],
-            "total_pl": float(r[1]),
-            "total_value": float(r[2])
-        } for idx, r in enumerate(rows)
-    ])
-
-@app.route("/api/analytics/kpis", methods=["GET"])
-def get_user_kpis():
-    user_id = session.get('user_id')
-    if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    # Prefer concurrent refresh; fallback to non-concurrent for safety.
-    try:
-        database.execute_query("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_user_daily_kpis")
-    except Exception:
-        try:
-            database.execute_query("REFRESH MATERIALIZED VIEW mv_user_daily_kpis")
-        except Exception as e:
-            return jsonify({"error": f"KPI refresh failed: {str(e)}"}), 500
-
-    rows = database.execute_query(
-        """
-        SELECT day, user_id, total_trades, buy_turnover, sell_turnover
-        FROM mv_user_daily_kpis
-        WHERE user_id = %s
-          AND day >= NOW() - INTERVAL '30 days'
-        ORDER BY day DESC
-        """,
-        (user_id,),
-        fetch=True
-    )
-    return jsonify([
-        {
-            "day": r[0].isoformat(),
-            "user_id": int(r[1]),
-            "total_trades": int(r[2]),
-            "buy_turnover": float(r[3]) if r[3] is not None else 0.0,
-            "sell_turnover": float(r[4]) if r[4] is not None else 0.0
-        } for r in rows
-    ])
-
-@app.route("/api/analytics/top_assets", methods=["GET"])
-def get_top_assets():
-    rows = database.execute_query(
-        """
-        SELECT a.symbol, a.name, m.total_traded_value
-        FROM mv_top_assets m
-        JOIN assets a ON a.asset_id = m.asset_id
-        ORDER BY m.total_traded_value DESC
-        LIMIT 5
-        """,
-        fetch=True
-    )
-    return jsonify([
-        {
-            "symbol": r[0],
-            "name": r[1],
-            "total_traded_value": float(r[2]) if r[2] is not None else 0.0
-        } for r in rows
-    ])
-
-def refresh_top_assets_job():
-    try:
-        database.execute_query("REFRESH MATERIALIZED VIEW mv_top_assets")
-        print("[scheduler] refreshed mv_top_assets")
+        assets = database.execute_query("SELECT asset_id FROM assets", fetch=True)
+        for (asset_id,) in assets:
+            database.execute_query("SELECT process_limit_orders(%s)", (asset_id,), fetch=True)
     except Exception as e:
-        print(f"[scheduler] mv_top_assets refresh failed: {e}")
+        print(f"[scheduler] limit order processing failed: {e}")
 
-def refresh_user_kpis_job():
+def expire_old_orders():
     try:
-        database.execute_query("REFRESH MATERIALIZED VIEW mv_user_daily_kpis")
-        print("[scheduler] refreshed mv_user_daily_kpis")
+        result = database.execute_query("SELECT expire_stale_orders()", fetch=True)
+        count = result[0][0] if result else 0
+        if count:
+            print(f"[scheduler] expired {count} stale orders")
     except Exception as e:
-        print(f"[scheduler] mv_user_daily_kpis refresh failed: {e}")
+        print(f"[scheduler] order expiry failed: {e}")
 
 def start_scheduler():
     if scheduler.running:
         return
-    scheduler.add_job(refresh_top_assets_job, "interval", minutes=10, id="refresh_top_assets", replace_existing=True)
-    scheduler.add_job(refresh_user_kpis_job, "interval", hours=1, id="refresh_user_kpis", replace_existing=True)
+    scheduler.add_job(process_pending_limit_orders, "interval", seconds=30, id="process_limits", replace_existing=True)
+    scheduler.add_job(expire_old_orders,           "interval", minutes=5,  id="expire_orders",   replace_existing=True)
     scheduler.start()
     print("[scheduler] started")
 
 if __name__ == "__main__":
     # Avoid duplicate schedulers with Flask reloader.
     if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+        if os.getenv("AUTO_INIT_DB", "false").lower() == "true":
+            database.init_db()
+            print("[startup] schema applied")
         start_scheduler()
     app.run(debug=True, port=5000)
