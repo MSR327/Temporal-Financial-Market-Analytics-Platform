@@ -6,6 +6,7 @@ CREATE EXTENSION IF NOT EXISTS citext;
 
 -- Drop dependent objects first
 DROP VIEW IF EXISTS portfolio_summary CASCADE;
+DROP VIEW IF EXISTS cumulative_pnl CASCADE;
 DROP VIEW IF EXISTS latest_prices CASCADE;
 DROP VIEW IF EXISTS portfolio_value CASCADE;
 DROP VIEW IF EXISTS profit_loss CASCADE;
@@ -16,6 +17,7 @@ DROP MATERIALIZED VIEW IF EXISTS mv_user_daily_kpis CASCADE;
 -- Drop tables
 DROP TABLE IF EXISTS audit_logs CASCADE;
 DROP TABLE IF EXISTS market_data CASCADE;
+DROP TABLE IF EXISTS realized_pnl CASCADE;
 DROP TABLE IF EXISTS portfolio_history CASCADE;
 DROP TABLE IF EXISTS trades CASCADE;
 DROP TABLE IF EXISTS orders CASCADE;
@@ -24,6 +26,9 @@ DROP TABLE IF EXISTS wallets CASCADE;
 DROP TABLE IF EXISTS assets CASCADE;
 DROP TABLE IF EXISTS users CASCADE;
 DROP TABLE IF EXISTS latest_prices_cache CASCADE;
+DROP FUNCTION IF EXISTS get_portfolio_at(INT, TIMESTAMPTZ) CASCADE;
+DROP FUNCTION IF EXISTS process_limit_orders(INT) CASCADE;
+DROP FUNCTION IF EXISTS expire_stale_orders() CASCADE;
 
 -- ========================= 
 -- 1. USERS 
@@ -155,6 +160,11 @@ CREATE TABLE market_data (
 ); 
 
 SELECT create_hypertable('market_data', 'time'); 
+ALTER TABLE market_data SET (
+  timescaledb.compress,
+  timescaledb.compress_segmentby = 'asset_id'
+);
+SELECT add_compression_policy('market_data', INTERVAL '7 days');
 
 -- Continuous Aggregate for Daily OHLC (Candlesticks)
 CREATE MATERIALIZED VIEW market_data_daily
@@ -225,6 +235,9 @@ CREATE TABLE orders (
     quantity NUMERIC(15,5) NOT NULL CHECK (quantity > 0), 
     price NUMERIC(15,5) NOT NULL CHECK (price > 0), 
     order_type TEXT CHECK (order_type IN ('buy', 'sell')) NOT NULL, 
+    order_kind TEXT NOT NULL DEFAULT 'market' CHECK (order_kind IN ('market', 'limit', 'stop_loss')),
+    target_price NUMERIC(15,5),
+    expires_at TIMESTAMPTZ,
     status TEXT CHECK (status IN ('open', 'filled', 'cancelled')) DEFAULT 'open', 
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (order_id, created_at)
@@ -233,6 +246,7 @@ CREATE TABLE orders (
 SELECT create_hypertable('orders', 'created_at');
 CREATE INDEX idx_orders_user_created_at ON orders(user_id, created_at DESC);
 CREATE INDEX idx_orders_user_status_created_at ON orders(user_id, status, created_at DESC);
+CREATE INDEX idx_orders_open_asset_kind_target ON orders(asset_id, order_kind, status, target_price);
 
 CREATE TABLE trades( 
     trade_id SERIAL, 
@@ -254,14 +268,32 @@ CREATE INDEX idx_trades_asset_executed_at ON trades(asset_id, executed_at DESC);
 -- 7. PORTFOLIO 
 -- ========================= 
 CREATE TABLE portfolio ( 
+    portfolio_version_id BIGSERIAL PRIMARY KEY,
     user_id INT REFERENCES users(user_id) ON DELETE CASCADE, 
     asset_id INT REFERENCES assets(asset_id) ON DELETE CASCADE, 
     quantity NUMERIC(15,5) DEFAULT 0 CHECK (quantity >= 0), 
     avg_price NUMERIC(15,5) DEFAULT 0 CHECK (avg_price >= 0),
-    PRIMARY KEY (user_id, asset_id) 
+    valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    valid_to TIMESTAMPTZ,
+    transaction_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    transaction_to TIMESTAMPTZ
 ); 
 
 CREATE INDEX idx_portfolio_user ON portfolio(user_id);
+CREATE INDEX idx_portfolio_current ON portfolio(user_id, asset_id) WHERE valid_to IS NULL AND transaction_to IS NULL;
+
+CREATE TABLE realized_pnl (
+    time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    user_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    asset_id INT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
+    quantity NUMERIC(15,5) NOT NULL,
+    buy_avg_price NUMERIC(15,5) NOT NULL,
+    sell_price NUMERIC(15,5) NOT NULL,
+    realized_profit NUMERIC(18,5) NOT NULL
+);
+
+SELECT create_hypertable('realized_pnl', 'time');
+CREATE INDEX idx_realized_pnl_user_time ON realized_pnl(user_id, time DESC);
 
 -- ========================= 
 -- 8. TRIGGERS FOR TRADES
@@ -289,28 +321,67 @@ CREATE OR REPLACE FUNCTION fn_update_portfolio_after_trade()
 RETURNS TRIGGER AS $$ 
 DECLARE
     v_current_qty NUMERIC;
+    v_current_avg NUMERIC;
+    v_new_qty NUMERIC;
+    v_new_avg NUMERIC;
+    v_realized NUMERIC;
 BEGIN 
     IF NEW.trade_type = 'buy' THEN
-        INSERT INTO portfolio(user_id, asset_id, quantity, avg_price) 
-        VALUES (NEW.user_id, NEW.asset_id, NEW.quantity, NEW.price) 
-        ON CONFLICT (user_id, asset_id) 
-        DO UPDATE SET 
-            avg_price = (portfolio.avg_price * portfolio.quantity + (NEW.price * NEW.quantity)) / (portfolio.quantity + NEW.quantity),
-            quantity = portfolio.quantity + NEW.quantity; 
-    ELSE
-        SELECT quantity INTO v_current_qty
+        SELECT quantity, avg_price INTO v_current_qty, v_current_avg
         FROM portfolio
-        WHERE user_id = NEW.user_id AND asset_id = NEW.asset_id
+        WHERE user_id = NEW.user_id
+          AND asset_id = NEW.asset_id
+          AND valid_to IS NULL
+          AND transaction_to IS NULL
+        FOR UPDATE;
+
+        IF v_current_qty IS NULL THEN
+            INSERT INTO portfolio(user_id, asset_id, quantity, avg_price, valid_from, valid_to, transaction_from, transaction_to)
+            VALUES (NEW.user_id, NEW.asset_id, NEW.quantity, NEW.price, NOW(), NULL, NOW(), NULL);
+        ELSE
+            v_new_qty := v_current_qty + NEW.quantity;
+            v_new_avg := ((v_current_avg * v_current_qty) + (NEW.price * NEW.quantity)) / NULLIF(v_new_qty, 0);
+
+            UPDATE portfolio
+            SET valid_to = NOW(), transaction_to = NOW()
+            WHERE user_id = NEW.user_id
+              AND asset_id = NEW.asset_id
+              AND valid_to IS NULL
+              AND transaction_to IS NULL;
+
+            INSERT INTO portfolio(user_id, asset_id, quantity, avg_price, valid_from, valid_to, transaction_from, transaction_to)
+            VALUES (NEW.user_id, NEW.asset_id, v_new_qty, COALESCE(v_new_avg, NEW.price), NOW(), NULL, NOW(), NULL);
+        END IF;
+    ELSE
+        SELECT quantity, avg_price INTO v_current_qty, v_current_avg
+        FROM portfolio
+        WHERE user_id = NEW.user_id
+          AND asset_id = NEW.asset_id
+          AND valid_to IS NULL
+          AND transaction_to IS NULL
         FOR UPDATE;
 
         IF v_current_qty IS NULL OR v_current_qty < NEW.quantity THEN
             RAISE EXCEPTION 'Insufficient holdings for user % on asset %', NEW.user_id, NEW.asset_id;
         END IF;
 
-        UPDATE portfolio SET quantity = quantity - NEW.quantity 
-        WHERE user_id = NEW.user_id AND asset_id = NEW.asset_id; 
-        
-        DELETE FROM portfolio WHERE user_id = NEW.user_id AND asset_id = NEW.asset_id AND quantity = 0;
+        v_new_qty := v_current_qty - NEW.quantity;
+        v_realized := (NEW.price - v_current_avg) * NEW.quantity;
+
+        INSERT INTO realized_pnl(time, user_id, asset_id, quantity, buy_avg_price, sell_price, realized_profit)
+        VALUES (NOW(), NEW.user_id, NEW.asset_id, NEW.quantity, v_current_avg, NEW.price, v_realized);
+
+        UPDATE portfolio
+        SET valid_to = NOW(), transaction_to = NOW()
+        WHERE user_id = NEW.user_id
+          AND asset_id = NEW.asset_id
+          AND valid_to IS NULL
+          AND transaction_to IS NULL;
+
+        IF v_new_qty > 0 THEN
+            INSERT INTO portfolio(user_id, asset_id, quantity, avg_price, valid_from, valid_to, transaction_from, transaction_to)
+            VALUES (NEW.user_id, NEW.asset_id, v_new_qty, v_current_avg, NOW(), NULL, NOW(), NULL);
+        END IF;
     END IF;
     RETURN NEW; 
 END; 
@@ -327,10 +398,11 @@ FOR EACH ROW EXECUTE FUNCTION fn_update_portfolio_after_trade();
 CREATE OR REPLACE FUNCTION execute_trade(p_order_id INT) 
 RETURNS VOID AS $$ 
 DECLARE 
-    v_user INT; v_asset INT; v_type TEXT; v_price NUMERIC; v_qty NUMERIC;
+    v_user INT; v_asset INT; v_type TEXT; v_price NUMERIC; v_qty NUMERIC; v_kind TEXT;
     v_total_cost NUMERIC; v_balance NUMERIC; v_holdings NUMERIC;
 BEGIN 
-    SELECT user_id, asset_id, order_type, price, quantity INTO v_user, v_asset, v_type, v_price, v_qty 
+    SELECT user_id, asset_id, order_type, price, quantity, order_kind
+    INTO v_user, v_asset, v_type, v_price, v_qty, v_kind
     FROM orders WHERE order_id = p_order_id;
     
     v_total_cost := v_price * v_qty;
@@ -343,7 +415,13 @@ BEGIN
             RAISE EXCEPTION 'Insufficient balance';
         END IF;
     ELSE
-        SELECT quantity INTO v_holdings FROM portfolio WHERE user_id = v_user AND asset_id = v_asset FOR UPDATE;
+        SELECT quantity INTO v_holdings
+        FROM portfolio
+        WHERE user_id = v_user
+          AND asset_id = v_asset
+          AND valid_to IS NULL
+          AND transaction_to IS NULL
+        FOR UPDATE;
         IF v_holdings IS NULL OR v_holdings < v_qty THEN
             UPDATE orders SET status = 'cancelled' WHERE order_id = p_order_id;
             RAISE EXCEPTION 'Insufficient assets';
@@ -362,6 +440,24 @@ CREATE OR REPLACE FUNCTION place_order(p_user INT, p_asset INT, p_type TEXT, p_q
 RETURNS INT AS $$ 
 DECLARE v_price NUMERIC; v_order_id INT;
 BEGIN 
+    RETURN place_order(p_user, p_asset, p_type, p_qty, 'market', NULL, NULL);
+END; 
+$$ LANGUAGE plpgsql; 
+
+CREATE OR REPLACE FUNCTION place_order(
+    p_user INT,
+    p_asset INT,
+    p_type TEXT,
+    p_qty NUMERIC,
+    p_order_kind TEXT DEFAULT 'market',
+    p_target_price NUMERIC DEFAULT NULL,
+    p_expires_at TIMESTAMPTZ DEFAULT NULL
+) RETURNS INT AS $$
+DECLARE
+    v_price NUMERIC;
+    v_order_id INT;
+    v_kind TEXT;
+BEGIN
     IF p_qty IS NULL OR p_qty <= 0 THEN
         RAISE EXCEPTION 'Quantity must be greater than zero';
     END IF;
@@ -370,17 +466,99 @@ BEGIN
         RAISE EXCEPTION 'Invalid order type';
     END IF;
 
+    v_kind := LOWER(COALESCE(p_order_kind, 'market'));
+    IF v_kind NOT IN ('market', 'limit', 'stop_loss') THEN
+        RAISE EXCEPTION 'Invalid order kind';
+    END IF;
+
     SELECT price INTO v_price FROM latest_prices WHERE asset_id = p_asset;
-    IF v_price IS NULL THEN RAISE EXCEPTION 'No price data available'; END IF;
+    IF v_price IS NULL THEN
+        RAISE EXCEPTION 'No price data available';
+    END IF;
 
-    INSERT INTO orders(user_id, asset_id, quantity, price, order_type) 
-    VALUES (p_user, p_asset, p_qty, v_price, LOWER(p_type)) 
-    RETURNING order_id INTO v_order_id; 
+    IF v_kind IN ('limit', 'stop_loss') AND (p_target_price IS NULL OR p_target_price <= 0) THEN
+        RAISE EXCEPTION 'Target price required for limit/stop_loss orders';
+    END IF;
 
-    PERFORM execute_trade(v_order_id);
+    INSERT INTO orders(user_id, asset_id, quantity, price, order_type, order_kind, target_price, expires_at, status)
+    VALUES (
+        p_user,
+        p_asset,
+        p_qty,
+        COALESCE(p_target_price, v_price),
+        LOWER(p_type),
+        v_kind,
+        p_target_price,
+        p_expires_at,
+        CASE WHEN v_kind = 'market' THEN 'open' ELSE 'open' END
+    )
+    RETURNING order_id INTO v_order_id;
+
+    IF v_kind = 'market' THEN
+        PERFORM execute_trade(v_order_id);
+    END IF;
+
     RETURN v_order_id;
-END; 
-$$ LANGUAGE plpgsql; 
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION process_limit_orders(p_asset_id INT)
+RETURNS INT AS $$
+DECLARE
+    v_latest_price NUMERIC;
+    v_processed INT := 0;
+    v_order RECORD;
+BEGIN
+    SELECT price INTO v_latest_price FROM latest_prices WHERE asset_id = p_asset_id;
+    IF v_latest_price IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    FOR v_order IN
+        SELECT order_id, order_type, order_kind, target_price
+        FROM orders
+        WHERE asset_id = p_asset_id
+          AND status = 'open'
+          AND order_kind IN ('limit', 'stop_loss')
+          AND (expires_at IS NULL OR expires_at > NOW())
+        ORDER BY created_at ASC
+    LOOP
+        IF (
+            v_order.order_kind = 'limit' AND (
+                (v_order.order_type = 'buy' AND v_latest_price <= v_order.target_price) OR
+                (v_order.order_type = 'sell' AND v_latest_price >= v_order.target_price)
+            )
+        ) OR (
+            v_order.order_kind = 'stop_loss' AND (
+                (v_order.order_type = 'buy' AND v_latest_price >= v_order.target_price) OR
+                (v_order.order_type = 'sell' AND v_latest_price <= v_order.target_price)
+            )
+        ) THEN
+            UPDATE orders SET price = v_latest_price WHERE order_id = v_order.order_id;
+            PERFORM execute_trade(v_order.order_id);
+            v_processed := v_processed + 1;
+        END IF;
+    END LOOP;
+
+    RETURN v_processed;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION expire_stale_orders()
+RETURNS INT AS $$
+DECLARE
+    v_count INT;
+BEGIN
+    UPDATE orders
+    SET status = 'cancelled'
+    WHERE status = 'open'
+      AND expires_at IS NOT NULL
+      AND expires_at <= NOW();
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$ LANGUAGE plpgsql;
 
 -- ========================= 
 -- 10. PORTFOLIO HISTORY (PARTITIONED)
@@ -411,10 +589,44 @@ BEGIN
     FROM users u
     LEFT JOIN wallets w ON u.user_id = w.user_id
     LEFT JOIN portfolio p ON u.user_id = p.user_id 
+        AND p.valid_to IS NULL
+        AND p.transaction_to IS NULL
     LEFT JOIN latest_prices lp ON p.asset_id = lp.asset_id 
     GROUP BY u.user_id, w.balance; 
 END; 
 $$ LANGUAGE plpgsql; 
+
+CREATE OR REPLACE FUNCTION get_portfolio_at(p_user_id INT, p_as_of TIMESTAMPTZ)
+RETURNS TABLE (
+    user_id INT,
+    asset_id INT,
+    quantity NUMERIC,
+    avg_price NUMERIC,
+    valid_from TIMESTAMPTZ,
+    valid_to TIMESTAMPTZ,
+    transaction_from TIMESTAMPTZ,
+    transaction_to TIMESTAMPTZ
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        p.user_id,
+        p.asset_id,
+        p.quantity,
+        p.avg_price,
+        p.valid_from,
+        p.valid_to,
+        p.transaction_from,
+        p.transaction_to
+    FROM portfolio p
+    WHERE p.user_id = p_user_id
+      AND p.valid_from <= p_as_of
+      AND (p.valid_to IS NULL OR p.valid_to > p_as_of)
+      AND p.transaction_from <= p_as_of
+      AND (p.transaction_to IS NULL OR p.transaction_to > p_as_of)
+    ORDER BY p.asset_id;
+END;
+$$ LANGUAGE plpgsql;
 
 -- ========================= 
 -- 11. VIEWS
@@ -429,7 +641,9 @@ SELECT
     (COALESCE(lp.price, 0) - p.avg_price) * p.quantity as unrealized_pl
 FROM portfolio p 
 JOIN assets a ON p.asset_id = a.asset_id
-LEFT JOIN latest_prices lp ON p.asset_id = lp.asset_id; 
+LEFT JOIN latest_prices lp ON p.asset_id = lp.asset_id
+WHERE p.valid_to IS NULL
+  AND p.transaction_to IS NULL; 
 
 CREATE MATERIALIZED VIEW mv_top_assets AS 
 SELECT asset_id, SUM(quantity * price) AS total_traded_value 
@@ -446,6 +660,19 @@ SELECT
 FROM trades
 GROUP BY day, user_id
 WITH NO DATA;
+
+CREATE VIEW cumulative_pnl AS
+SELECT
+    rp.user_id,
+    rp.time,
+    rp.realized_profit,
+    SUM(rp.realized_profit) OVER (
+        PARTITION BY rp.user_id
+        ORDER BY rp.time
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS cumulative_realized_pnl
+FROM realized_pnl rp
+ORDER BY rp.user_id, rp.time;
 
 CREATE OR REPLACE FUNCTION deposit_money(p_user_id INT, p_amount NUMERIC) RETURNS VOID AS $$
 BEGIN

@@ -5,6 +5,7 @@ import database
 from datetime import datetime, timezone, timedelta
 import os
 from apscheduler.schedulers.background import BackgroundScheduler
+import yfinance as yf
 
 app = Flask(__name__, template_folder='../templates', static_folder='../static')
 app.secret_key = os.urandom(24)
@@ -214,16 +215,35 @@ def place_order():
     asset_id = data.get("asset_id")
     order_type = data.get("order_type")
     quantity = data.get("quantity")
+    order_kind = (data.get("order_kind") or "market").lower()
+    target_price = data.get("target_price")
+    expires_at = data.get("expires_at")
 
     if not asset_id or not order_type or not quantity:
         return jsonify({"error": "Missing trade parameters"}), 400
 
     try:
+        if order_kind in ("limit", "stop_loss"):
+            if target_price is None:
+                return jsonify({"error": "target_price is required for limit/stop_loss orders"}), 400
+            target_price = float(target_price)
+        else:
+            target_price = None
+
+        if expires_at:
+            try:
+                # Accept ISO style timestamps from UI.
+                expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            except ValueError:
+                return jsonify({"error": "Invalid expires_at format"}), 400
+        else:
+            expires_at = None
+
         # Use execute_query with fetch=True to get the result of the function
         # and ensure the transaction is committed
         result = database.execute_query(
-            "SELECT place_order(%s, %s, %s, %s)",
-            (user_id, asset_id, order_type, quantity),
+            "SELECT place_order(%s, %s, %s, %s, %s, %s, %s)",
+            (user_id, asset_id, order_type, quantity, order_kind, target_price, expires_at),
             fetch=True
         )
         order_id = result[0][0]
@@ -300,10 +320,21 @@ def get_transactions():
 
 @app.route("/api/prices", methods=["GET"])
 def get_latest_prices():
+    try:
+        database.execute_query("SELECT expire_stale_orders()", fetch=True)
+    except Exception:
+        pass
+
     prices = database.execute_query(
         "SELECT a.symbol, a.name, lp.price, lp.time, a.asset_id FROM latest_prices lp JOIN assets a ON lp.asset_id = a.asset_id",
         fetch=True
     )
+    for r in prices:
+        try:
+            database.execute_query("SELECT process_limit_orders(%s)", (r[4],), fetch=True)
+        except Exception:
+            # Keep price API resilient even if limit processing fails for one asset.
+            continue
     return jsonify([{"symbol": r[0], "name": r[1], "price": float(r[2]), "time": r[3], "asset_id": r[4]} for r in prices])
 
 @app.route("/api/analytics/ohlc/<int:asset_id>", methods=["GET"])
@@ -529,6 +560,84 @@ def get_market_orderbook(asset_id):
     return jsonify({
         "bids": [{"price": float(r[0]), "quantity": float(r[1])} for r in bids],
         "asks": [{"price": float(r[0]), "quantity": float(r[1])} for r in asks]
+    })
+
+@app.route("/api/analytics/yf_candles/<int:asset_id>", methods=["GET"])
+def get_yfinance_candles(asset_id):
+    supported_intervals = ["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1d"]
+    interval = (request.args.get("interval") or "1d").lower()
+    period = (request.args.get("range") or "1mo").lower()
+
+    if interval not in supported_intervals:
+        return jsonify({"error": "Unsupported interval"}), 400
+
+    asset = database.execute_query(
+        "SELECT symbol, type FROM assets WHERE asset_id = %s",
+        (asset_id,),
+        fetch=True
+    )
+    if not asset:
+        return jsonify({"error": "Asset not found"}), 404
+
+    symbol, asset_type = asset[0]
+    ticker_symbol = f"{symbol}-USD" if asset_type == "crypto" else symbol
+
+    # Enforce yfinance interval constraints.
+    intraday_intervals = {"1m", "2m", "5m", "15m", "30m", "60m", "90m"}
+    warning = None
+    effective_period = period
+
+    if interval == "1m":
+        effective_period = "7d"
+        if period != "7d":
+            warning = "1m data is only available for the last 7 days; range adjusted to 7d."
+    elif interval in intraday_intervals:
+        allowed = {"1d", "5d", "7d", "1mo", "2mo"}
+        if period not in allowed:
+            effective_period = "2mo"
+            warning = "Intraday intervals (<1d) are available for about 60 days; range adjusted to 2mo."
+
+    try:
+        hist = yf.Ticker(ticker_symbol).history(period=effective_period, interval=interval, auto_adjust=False)
+    except Exception as e:
+        return jsonify({"error": f"yfinance fetch failed: {e}"}), 500
+
+    if hist.empty:
+        return jsonify({
+            "meta": {
+                "interval": interval,
+                "requested_range": period,
+                "effective_range": effective_period,
+                "warning": warning
+            },
+            "candles": []
+        })
+
+    candles = []
+    for idx, row in hist.iterrows():
+        dt = idx.to_pydatetime()
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        adj_close = row.get("Adj Close", row.get("Close", 0))
+        candles.append({
+            "time": dt.isoformat(),
+            "open": float(row.get("Open", 0) or 0),
+            "high": float(row.get("High", 0) or 0),
+            "low": float(row.get("Low", 0) or 0),
+            "close": float(row.get("Close", 0) or 0),
+            "adj_close": float(adj_close or 0),
+            "volume": float(row.get("Volume", 0) or 0)
+        })
+
+    return jsonify({
+        "meta": {
+            "interval": interval,
+            "requested_range": period,
+            "effective_range": effective_period,
+            "warning": warning,
+            "supported_intervals": supported_intervals
+        },
+        "candles": candles
     })
 
 @app.route("/api/analytics/sma/<int:asset_id>", methods=["GET"])

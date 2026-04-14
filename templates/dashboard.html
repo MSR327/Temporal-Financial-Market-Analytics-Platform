@@ -77,8 +77,35 @@
                     <button class="tab-btn market-tab" onclick="setChartPeriod('6M')">6M</button>
                     <button class="tab-btn market-tab" onclick="setChartPeriod('1Y')">1Y</button>
                 </div>
+                <div class="form-group" style="max-width: 240px;">
+                    <label>Interval (yfinance)</label>
+                    <select id="chart-interval" onchange="setChartInterval(this.value)">
+                        <option value="1m">1m</option>
+                        <option value="2m">2m</option>
+                        <option value="5m">5m</option>
+                        <option value="15m">15m</option>
+                        <option value="30m">30m</option>
+                        <option value="60m">60m</option>
+                        <option value="90m">90m</option>
+                        <option value="1d" selected>1d</option>
+                    </select>
+                </div>
+                <p id="interval-note" style="color: var(--text-secondary); margin-top: 0;">
+                    API limits: 1m -> last 7 days, intraday (<1d) -> about 60 days max.
+                </p>
                 <div style="height: 430px; position: relative;">
                     <canvas id="assetPriceChart"></canvas>
+                </div>
+                <div class="micro-panel" style="margin-top: 1rem;">
+                    <h4>OHLCV (API Feed)</h4>
+                    <table class="micro-table">
+                        <thead>
+                            <tr>
+                                <th>Date</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Adj Close</th><th>Volume</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ohlcv-body"></tbody>
+                    </table>
                 </div>
                 <div class="market-bottom-grid">
                     <div class="micro-panel">
@@ -119,6 +146,22 @@
                         <div class="form-group">
                             <label>Quantity</label>
                             <input type="number" id="market-trade-qty" step="0.00001" min="0.00001" placeholder="0.00000" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Order Kind</label>
+                            <select id="market-order-kind">
+                                <option value="market">Market</option>
+                                <option value="limit">Limit</option>
+                                <option value="stop_loss">Stop Loss</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Target Price (for limit/stop-loss)</label>
+                            <input type="number" id="market-target-price" step="0.00001" placeholder="Optional for market">
+                        </div>
+                        <div class="form-group">
+                            <label>Expires At (optional)</label>
+                            <input type="datetime-local" id="market-expires-at">
                         </div>
                         <button type="submit" class="trade-btn">Submit</button>
                     </form>
@@ -169,6 +212,22 @@
                         <input type="number" id="quantity" step="0.00001" placeholder="0.00" required oninput="calculateTotal()">
                     </div>
                     <div class="form-group">
+                        <label>Order Kind</label>
+                        <select id="order-kind">
+                            <option value="market">Market</option>
+                            <option value="limit">Limit</option>
+                            <option value="stop_loss">Stop Loss</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Target Price (for limit/stop-loss)</label>
+                        <input type="number" id="target-price" step="0.00001" placeholder="Optional for market">
+                    </div>
+                    <div class="form-group">
+                        <label>Expires At (optional)</label>
+                        <input type="datetime-local" id="expires-at">
+                    </div>
+                    <div class="form-group">
                         <p>Current Price: <span id="current-trade-price">$0.00</span></p>
                         <p>Estimated Total: <span id="estimated-total">$0.00</span></p>
                     </div>
@@ -211,12 +270,18 @@
     let selectedAssetSymbol = "";
     let selectedAssetName = "";
     let chartPeriod = "1D";
+    let chartInterval = "1d";
 
     function setChartPeriod(period) {
         chartPeriod = period;
         document.querySelectorAll('.market-tab').forEach(btn => {
             btn.classList.toggle('active', btn.innerText === period);
         });
+        if (selectedAssetId) updateAssetChart();
+    }
+
+    function setChartInterval(interval) {
+        chartInterval = interval;
         if (selectedAssetId) updateAssetChart();
     }
 
@@ -373,25 +438,57 @@
         }
     }
 
+    function rangeForPeriod(period) {
+        if (period === "1D") return "1d";
+        if (period === "1M") return "1mo";
+        if (period === "3M") return "3mo";
+        if (period === "6M") return "6mo";
+        return "1y";
+    }
+
+    function renderOhlcvTable(candles) {
+        const tbody = document.getElementById('ohlcv-body');
+        if (!tbody) return;
+        const rows = [...candles].slice(-12).reverse();
+        tbody.innerHTML = rows.map(c => `
+            <tr>
+                <td>${new Date(c.time).toLocaleString()}</td>
+                <td>$${Number(c.open).toFixed(2)}</td>
+                <td>$${Number(c.high).toFixed(2)}</td>
+                <td>$${Number(c.low).toFixed(2)}</td>
+                <td>$${Number(c.close).toFixed(2)}</td>
+                <td>$${Number(c.adj_close).toFixed(2)}</td>
+                <td>${Number(c.volume || 0).toLocaleString()}</td>
+            </tr>
+        `).join('') || '<tr><td colspan="7" style="text-align:center">No OHLCV data</td></tr>';
+    }
+
     async function updateAssetChart() {
         if (!selectedAssetId) return;
-        const endpoint = chartPeriod === "1D" 
-            ? `/api/analytics/price_history/${selectedAssetId}`
-            : `/api/analytics/ohlc/${selectedAssetId}?period=${chartPeriod}`;
+        const endpoint = `/api/analytics/yf_candles/${selectedAssetId}?interval=${chartInterval}&range=${rangeForPeriod(chartPeriod)}`;
         
         const res = await fetch(endpoint);
-        const data = await res.json();
+        const payload = await res.json();
+        const data = payload.candles || [];
+        const noteElem = document.getElementById('interval-note');
+        if (noteElem) {
+            noteElem.innerText = payload?.meta?.warning
+                ? `API limit applied: ${payload.meta.warning}`
+                : "API limits: 1m -> last 7 days, intraday (<1d) -> about 60 days max.";
+        }
+        renderOhlcvTable(data);
         
         const ctx = document.getElementById('assetPriceChart').getContext('2d');
         if (assetChart) assetChart.destroy();
 
         const labels = data.map(d => {
             const date = new Date(d.time);
-            return chartPeriod === "1D"
-                ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                : date.toLocaleDateString([], { day: '2-digit', month: 'short' });
+            if (chartInterval === "1d") {
+                return date.toLocaleDateString([], { day: '2-digit', month: 'short' });
+            }
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         });
-        const values = data.map(d => chartPeriod === "1D" ? d.price : d.close);
+        const values = data.map(d => d.close);
 
         assetChart = new Chart(ctx, {
             type: 'line',
@@ -506,11 +603,21 @@
             const assetId = document.getElementById('assetSelect').value;
             const type = document.querySelector('input[name="orderType"]:checked').value;
             const qty = parseFloat(document.getElementById('quantity').value);
+            const orderKind = document.getElementById('order-kind').value;
+            const targetPrice = document.getElementById('target-price').value;
+            const expiresAt = document.getElementById('expires-at').value;
 
             const res = await fetch('/api/order', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ asset_id: assetId, order_type: type, quantity: qty })
+                body: JSON.stringify({
+                    asset_id: assetId,
+                    order_type: type,
+                    quantity: qty,
+                    order_kind: orderKind,
+                    target_price: targetPrice ? parseFloat(targetPrice) : null,
+                    expires_at: expiresAt || null
+                })
             });
 
             if (res.ok) {
@@ -533,10 +640,20 @@
             }
             const type = document.querySelector('input[name="marketOrderType"]:checked').value;
             const qty = parseFloat(document.getElementById('market-trade-qty').value);
+            const orderKind = document.getElementById('market-order-kind').value;
+            const targetPrice = document.getElementById('market-target-price').value;
+            const expiresAt = document.getElementById('market-expires-at').value;
             const res = await fetch('/api/order', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ asset_id: selectedAssetId, order_type: type, quantity: qty })
+                body: JSON.stringify({
+                    asset_id: selectedAssetId,
+                    order_type: type,
+                    quantity: qty,
+                    order_kind: orderKind,
+                    target_price: targetPrice ? parseFloat(targetPrice) : null,
+                    expires_at: expiresAt || null
+                })
             });
             if (res.ok) {
                 alert('Order placed');
