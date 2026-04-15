@@ -20,8 +20,12 @@
             <p class="value" id="global-portfolio">$0.00</p>
         </div>
         <div class="stat-card">
-            <h3>Total P/L</h3>
-            <p class="value" id="global-pl">$0.00</p>
+            <h3>Realized P&L</h3>
+            <p class="value" id="global-realized-pl">$0.00</p>
+        </div>
+        <div class="stat-card">
+            <h3>Unrealized P&L</h3>
+            <p class="value" id="global-unrealized-pl">$0.00</p>
         </div>
     </div>
 
@@ -225,6 +229,59 @@
         </div>
         {% endif %}
 
+        {% if page == 'analytics' %}
+        <div class="analytics-grid">
+            <div class="content-section">
+                <h3>Global Leaderboard</h3>
+                <p class="subtitle">Top 10 users by total P/L</p>
+                <table id="leaderboardTable">
+                    <thead>
+                        <tr>
+                            <th>Rank</th>
+                            <th>Username</th>
+                            <th>Total P/L</th>
+                        </tr>
+                    </thead>
+                    <tbody id="leaderboard-body"><!-- Loaded via JS --></tbody>
+                </table>
+            </div>
+
+            <div class="content-section">
+                <h3>Most Traded Assets</h3>
+                <p class="subtitle">Top 10 assets by trade count</p>
+                <table id="assetStatsTable">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Trades</th>
+                            <th>Total Volume</th>
+                        </tr>
+                    </thead>
+                    <tbody id="asset-stats-body"><!-- Loaded via JS --></tbody>
+                </table>
+            </div>
+
+            <div class="content-section full-width">
+                <h3>Advanced Indicators</h3>
+                <div class="form-group" style="max-width: 300px; margin-bottom: 1rem;">
+                    <select id="indicatorAssetSelect" class="search-input" onchange="updateIndicatorChart()">
+                        <option value="">Select Asset</option>
+                    </select>
+                </div>
+                <div class="indicator-charts">
+                    <div style="height: 350px;">
+                        <h4>Price vs 7-Day SMA</h4>
+                        <canvas id="smaChart"></canvas>
+                    </div>
+                    <div style="height: 350px;">
+                        <h4>Volatility Index</h4>
+                        <canvas id="volatilityChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
         {% if page == 'transactions' %}
         <div class="content-section">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
@@ -252,12 +309,118 @@
 
 <script>
     const currentPage = "{{ page }}";
-    let assetChart;
+    let assetChart, smaChart, volatilityChart;
     let pricesData = [];
     let selectedAssetId = null;
     let selectedAssetSymbol = "";
     let selectedAssetName = "";
     let chartPeriod = "1D";
+
+    async function loadAnalytics() {
+        if (currentPage !== 'analytics') return;
+
+        // Leaderboard
+        const lbRes = await fetch('/api/analytics/leaderboard');
+        const lbData = await lbRes.json();
+        document.getElementById('leaderboard-body').innerHTML = lbData.map((d, i) => `
+            <tr>
+                <td>${i + 1}</td>
+                <td><strong>${d.username}</strong></td>
+                <td class="${d.total_pl >= 0 ? 'pos' : 'neg'}">$${d.total_pl.toFixed(2)}</td>
+            </tr>
+        `).join('') || '<tr><td colspan="3">No leaderboard data</td></tr>';
+
+        // Asset Stats
+        const asRes = await fetch('/api/analytics/asset_stats');
+        const asData = await asRes.json();
+        document.getElementById('asset-stats-body').innerHTML = asData.map(d => `
+            <tr>
+                <td><strong>${d.symbol}</strong></td>
+                <td>${d.count}</td>
+                <td>$${d.volume.toLocaleString()}</td>
+            </tr>
+        `).join('') || '<tr><td colspan="3">No asset stats data</td></tr>';
+
+        // Populate Indicator Select
+        const select = document.getElementById('indicatorAssetSelect');
+        if (select && select.options.length <= 1) {
+            pricesData.forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p.asset_id;
+                opt.text = `${p.symbol} (${p.name || "Asset"})`;
+                select.add(opt);
+            });
+            // Select first asset by default
+            if (pricesData.length > 0) {
+                select.value = pricesData[0].asset_id;
+                updateIndicatorChart();
+            }
+        }
+    }
+
+    async function updateIndicatorChart() {
+        const assetId = document.getElementById('indicatorAssetSelect').value;
+        if (!assetId) return;
+
+        const res = await fetch(`/api/analytics/indicators/${assetId}`);
+        const data = await res.json();
+
+        const labels = data.map(d => new Date(d.time).toLocaleDateString([], { day: '2-digit', month: 'short' }));
+        const prices = data.map(d => d.price);
+        const smas = data.map(d => d.sma_7);
+        const volatilities = data.map(d => d.volatility);
+
+        // SMA Chart
+        const ctxSma = document.getElementById('smaChart').getContext('2d');
+        if (smaChart) smaChart.destroy();
+        smaChart = new Chart(ctxSma, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [
+                    { label: 'Price', data: prices, borderColor: '#00d09c', borderWidth: 3, pointRadius: 4, fill: false },
+                    { label: '7-Day SMA', data: smas, borderColor: '#ff9f43', borderWidth: 3, borderDash: [5, 5], pointRadius: 0, fill: false }
+                ]
+            },
+            options: { 
+                responsive: true, 
+                maintainAspectRatio: false, 
+                plugins: { legend: { display: true } },
+                scales: {
+                    x: { grid: { color: 'rgba(255,255,255,0.04)' } },
+                    y: { position: 'right', grid: { color: 'rgba(255,255,255,0.04)' } }
+                }
+            }
+        });
+
+        // Volatility Chart
+        const ctxVol = document.getElementById('volatilityChart').getContext('2d');
+        if (volatilityChart) volatilityChart.destroy();
+        volatilityChart = new Chart(ctxVol, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{ 
+                    label: 'Volatility', 
+                    data: volatilities, 
+                    borderColor: '#ff4d4d', 
+                    borderWidth: 3, 
+                    fill: true, 
+                    backgroundColor: 'rgba(255, 77, 77, 0.15)', 
+                    pointRadius: 4 
+                }]
+            },
+            options: { 
+                responsive: true, 
+                maintainAspectRatio: false, 
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { grid: { color: 'rgba(255,255,255,0.04)' } },
+                    y: { position: 'right', grid: { color: 'rgba(255,255,255,0.04)' } }
+                }
+            }
+        });
+    }
 
     function setChartPeriod(period) {
         chartPeriod = period;
@@ -357,29 +520,34 @@
 
     async function refreshDashboard() {
         try {
-            const [wRes, pRes, mRes] = await Promise.all([
+            const [wRes, pRes, mRes, pnlRes] = await Promise.all([
                 fetch('/api/wallet'),
                 fetch('/api/portfolio'),
-                fetch('/api/prices')
+                fetch('/api/prices'),
+                fetch('/api/analytics/pnl_summary')
             ]);
 
             const wallet = await wRes.json();
             const portfolio = await pRes.json();
+            const pnlSummary = await pnlRes.json();
             pricesData = await mRes.json();
 
             document.getElementById('global-wallet').innerText = fmtUsd(wallet.balance);
             
             let totalVal = 0;
-            let totalPL = 0;
             portfolio.forEach(i => {
                 totalVal += i.current_value;
-                totalPL += i.unrealized_pl;
             });
 
             document.getElementById('global-portfolio').innerText = fmtUsd(totalVal);
-            const plElem = document.getElementById('global-pl');
-            plElem.innerText = fmtUsd(totalPL);
-            plElem.className = `value ${totalPL >= 0 ? 'pos' : 'neg'}`;
+            
+            const rplElem = document.getElementById('global-realized-pl');
+            rplElem.innerText = fmtUsd(pnlSummary.realized_pnl);
+            rplElem.className = `value ${pnlSummary.realized_pnl >= 0 ? 'pos' : 'neg'}`;
+
+            const uplElem = document.getElementById('global-unrealized-pl');
+            uplElem.innerText = fmtUsd(pnlSummary.unrealized_pnl);
+            uplElem.className = `value ${pnlSummary.unrealized_pnl >= 0 ? 'pos' : 'neg'}`;
 
             if (currentPage === "markets") {
                 filterAssets(); // Keep search filter active
@@ -416,6 +584,7 @@
             if (currentPage === "home") loadHomeSnapshot();
             if (currentPage === "transactions") loadTransactions();
             if (currentPage === "portfolio") loadWalletHistory();
+            if (currentPage === "analytics") loadAnalytics();
 
         } catch (err) {
             console.error("Refresh Error:", err);

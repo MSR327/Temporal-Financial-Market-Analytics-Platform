@@ -296,11 +296,33 @@ CREATE INDEX idx_realized_pnl_user_time ON realized_pnl(user_id, time DESC);
 -- Trigger: Update wallet after trade
 CREATE OR REPLACE FUNCTION fn_update_wallet_after_trade() 
 RETURNS TRIGGER AS $$ 
+DECLARE
+    v_current_avg NUMERIC;
+    v_realized_pnl NUMERIC;
 BEGIN 
     IF NEW.trade_type = 'buy' THEN
         UPDATE wallets SET balance = balance - (NEW.price * NEW.quantity) WHERE user_id = NEW.user_id;
     ELSE
+        -- Realized P&L = (Selling Price - Original Purchase Price) * Quantity Sold
+        -- We get the original purchase price (avg_price) from the current portfolio version
+        SELECT avg_price INTO v_current_avg
+        FROM portfolio
+        WHERE user_id = NEW.user_id
+          AND asset_id = NEW.asset_id
+          AND valid_to IS NULL
+          AND transaction_to IS NULL;
+
+        v_realized_pnl := (NEW.price - COALESCE(v_current_avg, NEW.price)) * NEW.quantity;
+
+        -- Update balance: Add the full selling amount (already done by the simple logic)
+        -- The user specifically asked: "This money is now sitting in the user's cash balance"
+        -- Selling an asset already adds (price * quantity) to the balance.
+        -- Realized P&L is a *subset* of that total cash flow that represents profit.
         UPDATE wallets SET balance = balance + (NEW.price * NEW.quantity) WHERE user_id = NEW.user_id;
+        
+        -- Optional: Log the realized P&L specifically to audit logs for transparency
+        INSERT INTO audit_logs(user_id, action, old_value, new_value, context)
+        VALUES (NEW.user_id, 'REALIZED_PNL_BOOKED', 0, v_realized_pnl, jsonb_build_object('asset_id', NEW.asset_id, 'trade_id', NEW.trade_id));
     END IF;
     RETURN NEW; 
 END; 

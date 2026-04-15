@@ -48,6 +48,12 @@ def trade_page():
         return redirect(url_for('index'))
     return render_template("dashboard.html", username=session['username'], page='trade')
 
+@app.route("/analytics")
+def analytics_page():
+    if 'user_id' not in session:
+        return redirect(url_for('index'))
+    return render_template("dashboard.html", username=session['username'], page='analytics')
+
 @app.route("/transactions")
 def transactions_page():
     if 'user_id' not in session:
@@ -133,6 +139,10 @@ def deposit_wallet():
         amount = float(amount)
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid amount"}), 400
+
+    # Implement $500,000 deposit limit
+    if amount > 500000:
+        return jsonify({"error": "Maximum deposit amount is $500,000"}), 400
 
     try:
         database.execute_query(
@@ -602,6 +612,105 @@ def start_scheduler():
     scheduler.add_job(expire_old_orders,           "interval", minutes=5,  id="expire_orders",   replace_existing=True)
     scheduler.start()
     print("[scheduler] started")
+
+@app.route("/api/analytics/pnl_summary", methods=["GET"])
+def get_pnl_summary():
+    """Summary of realized vs unrealized P&L"""
+    user_id = session.get('user_id')
+    if not user_id: return jsonify({"error": "Unauthorized"}), 401
+
+    realized = database.execute_query(
+        "SELECT COALESCE(SUM(realized_profit), 0) FROM realized_pnl WHERE user_id = %s",
+        (user_id,),
+        fetch=True
+    )
+    unrealized = database.execute_query(
+        "SELECT COALESCE(SUM(unrealized_pl), 0) FROM portfolio_summary WHERE user_id = %s",
+        (user_id,),
+        fetch=True
+    )
+    
+    return jsonify({
+        "realized_pnl": float(realized[0][0]),
+        "unrealized_pnl": float(unrealized[0][0]),
+        "total_pnl": float(realized[0][0]) + float(unrealized[0][0])
+    })
+
+@app.route("/api/analytics/leaderboard", methods=["GET"])
+def get_leaderboard():
+    """Top Profitable Users (Based on realized and unrealized P/L)"""
+    rows = database.execute_query(
+        """
+        SELECT 
+            u.username,
+            COALESCE(SUM(ps.unrealized_pl), 0) AS total_pl
+        FROM users u
+        LEFT JOIN portfolio_summary ps ON u.user_id = ps.user_id
+        GROUP BY u.user_id, u.username
+        ORDER BY total_pl DESC
+        LIMIT 10;
+        """,
+        fetch=True
+    )
+    return jsonify([{"username": r[0], "total_pl": float(r[1])} for r in rows])
+
+@app.route("/api/analytics/asset_stats", methods=["GET"])
+def get_asset_stats():
+    """Most Traded Assets (By Trade Count)"""
+    rows = database.execute_query(
+        """
+        SELECT
+            a.symbol,
+            COUNT(t.trade_id) AS trade_count,
+            COALESCE(SUM(t.quantity * t.price), 0) AS volume
+        FROM trades t
+        JOIN assets a ON t.asset_id = a.asset_id
+        GROUP BY a.symbol
+        ORDER BY trade_count DESC
+        LIMIT 10;
+        """,
+        fetch=True
+    )
+    return jsonify([{"symbol": r[0], "count": r[1], "volume": float(r[2])} for r in rows])
+
+@app.route("/api/analytics/indicators/<int:asset_id>", methods=["GET"])
+def get_indicators(asset_id):
+    """Moving Average and Volatility for a specific asset, aggregated by day."""
+    rows = database.execute_query(
+        """
+        WITH daily_data AS (
+            SELECT
+                time_bucket('1 day', time) AS day_bucket,
+                asset_id,
+                AVG(price) AS daily_avg_price
+            FROM market_data
+            WHERE asset_id = %s
+            GROUP BY day_bucket, asset_id
+            ORDER BY day_bucket
+        ),
+        indicators AS (
+            SELECT 
+                day_bucket,
+                daily_avg_price,
+                AVG(daily_avg_price) OVER (PARTITION BY asset_id ORDER BY day_bucket ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS sma_7,
+                STDDEV(daily_avg_price) OVER (PARTITION BY asset_id ORDER BY day_bucket ROWS BETWEEN 20 PRECEDING AND CURRENT ROW) AS volatility
+            FROM daily_data
+        )
+        SELECT day_bucket, daily_avg_price, sma_7, volatility FROM indicators
+        ORDER BY day_bucket DESC
+        LIMIT 7;
+        """,
+        (asset_id,),
+        fetch=True
+    )
+    # Reverse for chronological order in charts
+    rows.reverse()
+    return jsonify([{
+        "time": r[0].isoformat(),
+        "price": float(r[1]),
+        "sma_7": float(r[2]) if r[2] else None,
+        "volatility": float(r[3]) if r[3] else None
+    } for r in rows])
 
 if __name__ == "__main__":
     # Avoid duplicate schedulers with Flask reloader.

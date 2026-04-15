@@ -28,6 +28,9 @@
             <a href="{{ url_for('trade_page') }}" class="nav-item {{ 'active' if page == 'trade' else '' }}">
                 <span class="icon">🔄</span> Trade
             </a>
+            <a href="{{ url_for('analytics_page') }}" class="nav-item {{ 'active' if page == 'analytics' else '' }}">
+                <span class="icon">📈</span> Market Analytics
+            </a>
             <a href="{{ url_for('transactions_page') }}" class="nav-item {{ 'active' if page == 'transactions' else '' }}">
                 <span class="icon">💳</span> Transactions
             </a>
